@@ -252,8 +252,13 @@ async def message_handler(event):
     elif state == "WAITING_ADD_LINK":
         link = event.text.strip()
         if 't.me' in link:
-            data["queue"].append(link)
-            await event.respond(f"✅ Added link to queue. Total links: {len(data['queue'])}")
+            if len(data["queue"]) >= 10:
+                await event.respond("❌ **Queue Full:** You can only add a maximum of 10 links for high-speed safety.")
+            elif link in data["queue"]:
+                await event.respond("⚠️ Link is already in the queue!")
+            else:
+                data["queue"].append(link)
+                await event.respond(f"✅ Added link to queue. Total links: {len(data['queue'])}")
         else:
             await event.respond("❌ Invalid link format. Must contain 't.me'.")
         data["login_state"] = None
@@ -373,12 +378,12 @@ async def runner_engine(user_id: int, chat_id: int):
         
         # Step A: Pre-Action Delay (Prevent Telegram Anti-Spam)
         # If this is the first action after pressing Start, make it instant (2-5s)
-        # Otherwise, space out the next joins by 10 to 30 seconds for fast looping
+        # Otherwise, space out the next joins by 40 to 50 seconds
         if not data.get("first_join_done"):
             delay = random.randint(2, 5)
             data["first_join_done"] = True
         else:
-            delay = random.randint(10, 30)
+            delay = random.randint(40, 50)
             
         await bot_client.send_message(chat_id, f"⏳ **Step A:** Sleeping for {delay} seconds before joining next link...")
         
@@ -399,8 +404,8 @@ async def runner_engine(user_id: int, chat_id: int):
             data["daily_joins"].append(time.time())
             await bot_client.send_message(chat_id, f"✅ **Success:** Joined chat ID `{joined_chat_id}`")
             
-            # Step C: The Stay Simulation (Leave under 30s to prevent group owner bans)
-            stay_delay = random.randint(5, 30)
+            # Step C: The Stay Simulation (Leave under 10-20s to prevent group owner bans)
+            stay_delay = random.randint(10, 20)
             await bot_client.send_message(chat_id, f"🧍 **Step C:** Simulating stay. Waiting {stay_delay} seconds in group...")
             
             if not await interruptible_sleep(stay_delay, user_id):
@@ -409,7 +414,16 @@ async def runner_engine(user_id: int, chat_id: int):
             await bot_client.send_message(chat_id, f"👋 **Step D:** Leaving chat ID `{joined_chat_id}`")
             await user_client.delete_dialog(joined_chat_id)
             
-            data["current_index"] = (data["current_index"] + 1) % len(data["queue"])
+            data["current_index"] += 1
+            
+            # LOOP COOLDOWN: If we completed a full cycle of all links, rest to prevent account ban
+            if data["current_index"] >= len(data["queue"]):
+                data["current_index"] = 0
+                
+                cooldown = random.randint(900, 1800) # 15 to 30 minutes
+                await bot_client.send_message(chat_id, f"🛡️ **Loop Cooldown Activated:** Finished all {len(data['queue'])} links. Sleeping for {cooldown // 60} minutes to prevent an instant Telegram ban...")
+                if not await interruptible_sleep(cooldown, user_id):
+                    break
             
         except UserAlreadyParticipantError:
             await bot_client.send_message(chat_id, f"ℹ️ Already a participant of `{link}`. Skipping to next.")
