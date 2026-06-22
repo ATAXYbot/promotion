@@ -19,6 +19,8 @@ from telethon.errors import (
     PhoneNumberInvalidError, PhoneCodeInvalidError, PhoneCodeExpiredError
 )
 from telethon.tl.functions.messages import ImportChatInviteRequest
+from telethon.tl.types import BotCommand, BotCommandScopeDefault
+from telethon.tl.functions.bots import SetBotCommandsRequest
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -457,6 +459,19 @@ async def main():
 
     logger.info("Starting Bot Client...")
     await bot_client.start(bot_token=BOT_TOKEN)
+    
+    # Set the Telegram Bot Menu Commands
+    await bot_client(SetBotCommandsRequest(
+        scope=BotCommandScopeDefault(),
+        lang_code='',
+        commands=[
+            BotCommand(command="start", description="Open Dashboard"),
+            BotCommand(command="login", description="Login to your personal account"),
+            BotCommand(command="help", description="Show the help menu"),
+            BotCommand(command="cancel", description="Cancel current action")
+        ]
+    ))
+    
     logger.info("Public Multi-User Bot Online! Send /start to the bot.")
     
     await bot_client.run_until_disconnected()
