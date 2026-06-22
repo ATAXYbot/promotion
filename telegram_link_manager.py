@@ -196,10 +196,10 @@ async def message_handler(event):
             
         data["phone"] = phone
         client = TelegramClient(f'sessions/user_{user_id}', API_ID, API_HASH)
-        await client.connect()
-        data["client"] = client
         
         try:
+            await client.connect()
+            data["client"] = client
             res = await client.send_code_request(phone)
             data["phone_code_hash"] = res.phone_code_hash
             data["login_state"] = "WAITING_CODE"
