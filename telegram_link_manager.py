@@ -321,6 +321,7 @@ async def callback_handler(event):
             await event.answer("Loop is already stopped!", alert=True)
             return
         data["loop_active"] = False
+        data["first_join_done"] = False
         await event.respond("⏸️ **Loop Paused!** Will safely halt after the current sleep/action finishes.")
         await show_menu(event.chat_id, user_id)
         
@@ -378,7 +379,15 @@ async def runner_engine(user_id: int, chat_id: int):
             
         link = data["queue"][data["current_index"]]
         
-        delay = random.randint(240, 600)
+        # Step A: Pre-Action Delay (Prevent Telegram Anti-Spam)
+        # If this is the first action after pressing Start, make it instant (2-5s)
+        # Otherwise, space out the next joins by 1 to 3 minutes
+        if not data.get("first_join_done"):
+            delay = random.randint(2, 5)
+            data["first_join_done"] = True
+        else:
+            delay = random.randint(60, 180)
+            
         await bot_client.send_message(chat_id, f"⏳ **Step A:** Sleeping for {delay} seconds before joining next link...")
         
         if not await interruptible_sleep(delay, user_id):
@@ -398,7 +407,8 @@ async def runner_engine(user_id: int, chat_id: int):
             data["daily_joins"].append(time.time())
             await bot_client.send_message(chat_id, f"✅ **Success:** Joined chat ID `{joined_chat_id}`")
             
-            stay_delay = random.randint(120, 300)
+            # Step C: The Stay Simulation (Leave under 30s to prevent group owner bans)
+            stay_delay = random.randint(5, 30)
             await bot_client.send_message(chat_id, f"🧍 **Step C:** Simulating stay. Waiting {stay_delay} seconds in group...")
             
             if not await interruptible_sleep(stay_delay, user_id):
