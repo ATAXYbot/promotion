@@ -23,8 +23,8 @@ from telethon.tl.functions.messages import ImportChatInviteRequest
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-API_ID = int(os.environ.get("TG_API_ID", "0"))  # <--- SET YOUR API_ID HERE
-API_HASH = os.environ.get("TG_API_HASH", "YOUR_API_HASH")  # <--- SET YOUR API_HASH HERE
+API_ID = int(os.environ.get("TG_API_ID", "20543583"))  # <--- SET YOUR API_ID HERE
+API_HASH = os.environ.get("TG_API_HASH", "505e57baf9b48347e18446d352cacce3")  # <--- SET YOUR API_HASH HERE
 BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "8925952271:AAG4krblXEPNWXX6g7oOdkrFMt8qkU4OFGA")
 
 # Ensure sessions directory exists
