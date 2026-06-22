@@ -19,8 +19,8 @@ from telethon.errors import (
     FloodWaitError, UserAlreadyParticipantError, SessionPasswordNeededError,
     PhoneNumberInvalidError, PhoneCodeInvalidError, PhoneCodeExpiredError
 )
-from telethon.tl.functions.messages import ImportChatInviteRequest
-from telethon.tl.types import BotCommand, BotCommandScopeDefault
+from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
+from telethon.tl.types import BotCommand, BotCommandScopeDefault, ChatInvite, ChatInviteAlready
 from telethon.tl.functions.bots import SetBotCommandsRequest
 from aiohttp import web
 
@@ -69,7 +69,10 @@ def load_state():
                         "phone": state.get("phone", None),
                         "phone_code_hash": state.get("phone_code_hash", None),
                         "next_join_time": state.get("next_join_time", 0),
-                        "first_join_done": state.get("first_join_done", False)
+                        "first_join_done": state.get("first_join_done", False),
+                        "link_stats": state.get("link_stats", {}),
+                        "active_links_count": state.get("active_links_count", 0),
+                        "passive_links_count": state.get("passive_links_count", 0)
                     }
         except Exception as e:
             logger.error(f"Error loading state: {e}")
@@ -86,7 +89,10 @@ def save_state():
             "phone": state["phone"],
             "phone_code_hash": state["phone_code_hash"],
             "next_join_time": state.get("next_join_time", 0),
-            "first_join_done": state.get("first_join_done", False)
+            "first_join_done": state.get("first_join_done", False),
+            "link_stats": state.get("link_stats", {}),
+            "active_links_count": state.get("active_links_count", 0),
+            "passive_links_count": state.get("passive_links_count", 0)
         }
     try:
         with open(STATE_FILE, 'w') as f:
@@ -107,7 +113,10 @@ def get_user_data(user_id):
             "phone_code_hash": None,
             "task": None,
             "next_join_time": 0,
-            "first_join_done": False
+            "first_join_done": False,
+            "link_stats": {},
+            "active_links_count": 0,
+            "passive_links_count": 0
         }
     return user_data[user_id]
 
@@ -479,79 +488,134 @@ async def runner_engine(user_id: int, chat_id: int):
                 continue
                 
         link = data["queue"][data["current_index"]]
+        hash_str = extract_hash(link)
         
-        # Step A: Pre-Action Delay (Prevent Telegram Anti-Spam)
-        if not data.get("first_join_done"):
-            delay = random.randint(2, 5)
-            data["first_join_done"] = True
-            save_state()
-        else:
-            delay = random.randint(15, 30)
-            
-        await bot_client.send_message(chat_id, f"⏳ **Step A:** Sleeping for {delay} seconds before joining next link...")
-        
-        if not await interruptible_sleep(delay, user_id):
-            break
-            
+        # -----------------------------
+        # DYNAMIC TRAFFIC CHECK
+        # -----------------------------
+        is_active_mode = True
         try:
-            hash_str = extract_hash(link)
-            await bot_client.send_message(chat_id, f"🔄 **Step B:** Attempting to join: {link}")
+            invite_info = await user_client(CheckChatInviteRequest(hash_str))
             
-            updates = await user_client(ImportChatInviteRequest(hash_str))
-            
-            if updates.chats:
-                joined_chat_id = updates.chats[0].id
-            else:
-                raise Exception("Could not resolve Chat ID from the join request updates.")
-            
-            data["daily_joins"].append(time.time())
-            save_state()
-            await bot_client.send_message(chat_id, f"✅ **Success:** Joined chat ID `{joined_chat_id}`")
-            
-            # Step C: The Stay Simulation
-            stay_delay = random.randint(10, 15)
-            await bot_client.send_message(chat_id, f"🧍 **Step C:** Simulating stay. Waiting {stay_delay} seconds in group...")
-            
-            if not await interruptible_sleep(stay_delay, user_id):
-                break
+            # Extract participants count
+            participants_count = None
+            if hasattr(invite_info, 'participants_count'):
+                participants_count = invite_info.participants_count
+            elif hasattr(invite_info, 'chat') and hasattr(invite_info.chat, 'participants_count'):
+                participants_count = invite_info.chat.participants_count
                 
-            await bot_client.send_message(chat_id, f"👋 **Step D:** Leaving chat ID `{joined_chat_id}`")
-            await user_client.delete_dialog(joined_chat_id)
-            
-            data["current_index"] += 1
-            save_state()
-            
-            # LOOP COOLDOWN
-            if data["current_index"] >= len(data["queue"]):
-                data["current_index"] = 0
+            if participants_count is not None:
+                last_count = data["link_stats"].get(hash_str, 0)
+                diff = participants_count - last_count
+                
+                # If we've checked this before and the difference is less than 7, it's passive
+                if last_count > 0 and diff < 7:
+                    is_active_mode = False
+                    await bot_client.send_message(chat_id, f"📉 **Passive Mode:** Only {diff} new users joined `{link}`. Skipping join to save quota.")
+                else:
+                    if last_count > 0:
+                        await bot_client.send_message(chat_id, f"🔥 **Active Mode:** {diff} new users joined `{link}`. Engaging!")
+                    else:
+                        await bot_client.send_message(chat_id, f"🔥 **Active Mode:** First time checking `{link}` ({participants_count} members). Engaging!")
+                
+                # Update stats
+                data["link_stats"][hash_str] = participants_count
                 save_state()
-                
-                cooldown = random.randint(120, 300) # 2 to 5 minutes
-                await bot_client.send_message(chat_id, f"🛡️ **Loop Cooldown Activated:** Finished all {len(data['queue'])} links. Sleeping for {cooldown // 60} minutes and {cooldown % 60} seconds before restarting loop...")
-                if not await interruptible_sleep(cooldown, user_id):
-                    break
-            
-        except UserAlreadyParticipantError:
-            await bot_client.send_message(chat_id, f"ℹ️ Already a participant of `{link}`. Skipping to next.")
-            data["current_index"] = (data["current_index"] + 1) % len(data["queue"])
-            save_state()
-            
-        except FloodWaitError as e:
-            sleep_time = e.seconds + 30
-            await bot_client.send_message(
-                chat_id, 
-                f"🚨 **FloodWaitError Caught!** Telegram asked to wait {e.seconds}s.\n"
-                f"Sleeping for {sleep_time} seconds before resuming..."
-            )
-            if not await interruptible_sleep(sleep_time, user_id):
-                break
-            
         except Exception as e:
-            await bot_client.send_message(chat_id, f"❌ **Error processing link {link}:**\n`{str(e)}`")
-            if data["queue"]:
-                data["current_index"] = (data["current_index"] + 1) % len(data["queue"])
+            # If we can't check it, default to active and let the join try block handle errors
+            pass
+
+        if is_active_mode:
+            data["active_links_count"] += 1
+            # Step A: Pre-Action Delay (Prevent Telegram Anti-Spam)
+            if not data.get("first_join_done"):
+                delay = random.randint(3, 8)
+                data["first_join_done"] = True
                 save_state()
-            await interruptible_sleep(10, user_id)
+            else:
+                delay = random.randint(15, 45)
+                
+            await bot_client.send_message(chat_id, f"⏳ **Step A:** Sleeping for {delay} seconds before joining next link...")
+            
+            if not await interruptible_sleep(delay, user_id):
+                break
+                
+            try:
+                await bot_client.send_message(chat_id, f"🔄 **Step B:** Attempting to join: {link}")
+                
+                updates = await user_client(ImportChatInviteRequest(hash_str))
+                
+                if updates.chats:
+                    joined_chat_id = updates.chats[0].id
+                else:
+                    raise Exception("Could not resolve Chat ID from the join request updates.")
+                
+                data["daily_joins"].append(time.time())
+                save_state()
+                await bot_client.send_message(chat_id, f"✅ **Success:** Joined chat ID `{joined_chat_id}`")
+                
+                # Step C: The Stay Simulation
+                stay_delay = random.randint(10, 25)
+                await bot_client.send_message(chat_id, f"🧍 **Step C:** Simulating stay. Waiting {stay_delay} seconds in group...")
+                
+                if not await interruptible_sleep(stay_delay, user_id):
+                    break
+                    
+                await bot_client.send_message(chat_id, f"👋 **Step D:** Leaving chat ID `{joined_chat_id}`")
+                await user_client.delete_dialog(joined_chat_id)
+                
+            except UserAlreadyParticipantError:
+                await bot_client.send_message(chat_id, f"ℹ️ Already a participant of `{link}`. Skipping.")
+                
+            except FloodWaitError as e:
+                sleep_time = e.seconds + 30
+                await bot_client.send_message(
+                    chat_id, 
+                    f"🚨 **FloodWaitError Caught!** Telegram asked to wait {e.seconds}s.\n"
+                    f"Sleeping for {sleep_time} seconds before resuming..."
+                )
+                if not await interruptible_sleep(sleep_time, user_id):
+                    break
+                
+            except Exception as e:
+                await bot_client.send_message(chat_id, f"❌ **Error processing link {link}:**\n`{str(e)}`")
+                await interruptible_sleep(10, user_id)
+        else:
+            data["passive_links_count"] += 1
+            # Passive mode sleep is very short
+            await interruptible_sleep(random.randint(5, 15), user_id)
+
+        # Move to next link
+        data["current_index"] += 1
+        save_state()
+        
+        # LOOP COOLDOWN
+        if data["current_index"] >= len(data["queue"]):
+            data["current_index"] = 0
+            
+            # Calculate dynamic cooldown based on traffic
+            total_checked = data["active_links_count"] + data["passive_links_count"]
+            if total_checked == 0:
+                total_checked = 1
+                
+            active_ratio = data["active_links_count"] / total_checked
+            
+            if active_ratio >= 0.5:
+                # High traffic globally, short sleep
+                cooldown = random.randint(120, 420) # 2 to 7 minutes
+                mode_str = "🔥 High Traffic Global"
+            else:
+                # Low traffic globally, long sleep
+                cooldown = random.randint(900, 1800) # 15 to 30 minutes
+                mode_str = "💤 Low Traffic Global"
+                
+            data["active_links_count"] = 0
+            data["passive_links_count"] = 0
+            save_state()
+            
+            await bot_client.send_message(chat_id, f"🛡️ **Loop Cooldown Activated ({mode_str}):** Finished all {len(data['queue'])} links. Sleeping for {cooldown // 60} minutes and {cooldown % 60} seconds before restarting loop...")
+            if not await interruptible_sleep(cooldown, user_id):
+                break
 
 # ==========================================
 # MAIN EXECUTION & DUMMY SERVER
