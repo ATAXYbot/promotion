@@ -21,6 +21,7 @@ from telethon.errors import (
 from telethon.tl.functions.messages import ImportChatInviteRequest
 from telethon.tl.types import BotCommand, BotCommandScopeDefault
 from telethon.tl.functions.bots import SetBotCommandsRequest
+from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -448,8 +449,21 @@ async def runner_engine(user_id: int, chat_id: int):
             await asyncio.sleep(10)
 
 # ==========================================
-# MAIN EXECUTION
+# MAIN EXECUTION & DUMMY SERVER
 # ==========================================
+
+async def handle_dummy(request):
+    return web.Response(text="Bot is running and healthy!")
+
+async def start_dummy_server():
+    app = web.Application()
+    app.router.add_get('/', handle_dummy)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"Dummy web server started on port {port} to satisfy Render deploy checks")
 
 async def main():
     if API_ID == 0:
@@ -458,6 +472,7 @@ async def main():
         return
 
     logger.info("Starting Bot Client...")
+    await start_dummy_server()
     await bot_client.start(bot_token=BOT_TOKEN)
     
     # Set the Telegram Bot Menu Commands
