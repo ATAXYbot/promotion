@@ -89,7 +89,7 @@ async def show_menu(chat_id: int, user_id: int):
     if data["client"] is None:
         session_file = f'sessions/user_{user_id}.session'
         if os.path.exists(session_file):
-            client = TelegramClient(f'sessions/user_{user_id}', API_ID, API_HASH)
+            client = TelegramClient(f'sessions/user_{user_id}', API_ID, API_HASH, flood_sleep_threshold=0, connection_retries=3)
             await client.connect()
             if await client.is_user_authorized():
                 data["client"] = client
@@ -156,7 +156,7 @@ async def login_handler(event):
     
     # Check existing session
     if data["client"] is None and os.path.exists(f'sessions/user_{user_id}.session'):
-        client = TelegramClient(f'sessions/user_{user_id}', API_ID, API_HASH)
+        client = TelegramClient(f'sessions/user_{user_id}', API_ID, API_HASH, flood_sleep_threshold=0, connection_retries=3)
         await client.connect()
         if await client.is_user_authorized():
             data["client"] = client
@@ -181,7 +181,8 @@ async def cancel_handler(event):
 
 @bot_client.on(events.NewMessage())
 async def message_handler(event):
-    if not getattr(event, 'text', None) or event.text.startswith('/'):
+    text = getattr(event, 'text', '') or ''
+    if text.startswith('/'):
         return
         
     user_id = event.sender_id
@@ -195,7 +196,7 @@ async def message_handler(event):
             return
             
         data["phone"] = phone
-        client = TelegramClient(f'sessions/user_{user_id}', API_ID, API_HASH)
+        client = TelegramClient(f'sessions/user_{user_id}', API_ID, API_HASH, flood_sleep_threshold=0, connection_retries=3)
         
         try:
             await client.connect()
