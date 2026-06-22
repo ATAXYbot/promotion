@@ -27,6 +27,13 @@ API_ID = int(os.environ.get("TG_API_ID", "20543583"))  # <--- SET YOUR API_ID HE
 API_HASH = os.environ.get("TG_API_HASH", "505e57baf9b48347e18446d352cacce3")  # <--- SET YOUR API_HASH HERE
 BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "8925952271:AAG4krblXEPNWXX6g7oOdkrFMt8qkU4OFGA")
 
+# Create and set a global event loop before Telethon initializes
+try:
+    loop = asyncio.get_event_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
 # Ensure sessions directory exists
 if not os.path.exists("sessions"):
     os.makedirs("sessions")
@@ -440,6 +447,6 @@ async def main():
 
 if __name__ == '__main__':
     try:
-        asyncio.run(main())
+        loop.run_until_complete(main())
     except KeyboardInterrupt:
         print("System stopped by user.")
