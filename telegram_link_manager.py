@@ -130,11 +130,11 @@ async def show_menu(chat_id: int, user_id: int):
 # BOT INTERFACE & LOGIN FLOW
 # ==========================================
 
-@bot_client.on(events.NewMessage(pattern='/start'))
+@bot_client.on(events.NewMessage(pattern='(?i)^/start'))
 async def start_handler(event):
     await show_menu(event.chat_id, event.sender_id)
 
-@bot_client.on(events.NewMessage(pattern='/help'))
+@bot_client.on(events.NewMessage(pattern='(?i)^/help'))
 async def help_handler(event):
     help_text = (
         "🤖 **Bot Instructions & Help**\n\n"
@@ -149,7 +149,7 @@ async def help_handler(event):
     )
     await event.respond(help_text)
 
-@bot_client.on(events.NewMessage(pattern='/login'))
+@bot_client.on(events.NewMessage(pattern='(?i)^/login'))
 async def login_handler(event):
     user_id = event.sender_id
     data = get_user_data(user_id)
@@ -172,7 +172,7 @@ async def login_handler(event):
         "Send /cancel to abort."
     )
 
-@bot_client.on(events.NewMessage(pattern='/cancel'))
+@bot_client.on(events.NewMessage(pattern='(?i)^/cancel'))
 async def cancel_handler(event):
     user_id = event.sender_id
     data = get_user_data(user_id)
@@ -181,7 +181,7 @@ async def cancel_handler(event):
 
 @bot_client.on(events.NewMessage())
 async def message_handler(event):
-    if event.text.startswith('/'):
+    if not getattr(event, 'text', None) or event.text.startswith('/'):
         return
         
     user_id = event.sender_id
