@@ -12,6 +12,7 @@ import os
 import random
 import time
 import re
+import json
 
 from telethon import TelegramClient, events, Button
 from telethon.errors import (
@@ -47,6 +48,51 @@ bot_client = TelegramClient('sessions/control_bot', API_ID, API_HASH)
 # MULTI-USER STATE MANAGEMENT
 # ==========================================
 user_data = {}
+STATE_FILE = "sessions/state.json"
+
+def load_state():
+    global user_data
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, 'r') as f:
+                data = json.load(f)
+                for str_user_id, state in data.items():
+                    user_id = int(str_user_id)
+                    user_data[user_id] = {
+                        "client": None,
+                        "task": None,
+                        "queue": state.get("queue", []),
+                        "current_index": state.get("current_index", 0),
+                        "loop_active": state.get("loop_active", False),
+                        "daily_joins": state.get("daily_joins", []),
+                        "login_state": state.get("login_state", None),
+                        "phone": state.get("phone", None),
+                        "phone_code_hash": state.get("phone_code_hash", None),
+                        "next_join_time": state.get("next_join_time", 0),
+                        "first_join_done": state.get("first_join_done", False)
+                    }
+        except Exception as e:
+            logger.error(f"Error loading state: {e}")
+
+def save_state():
+    state_to_save = {}
+    for user_id, state in user_data.items():
+        state_to_save[str(user_id)] = {
+            "queue": state["queue"],
+            "current_index": state["current_index"],
+            "loop_active": state["loop_active"],
+            "daily_joins": state["daily_joins"],
+            "login_state": state["login_state"],
+            "phone": state["phone"],
+            "phone_code_hash": state["phone_code_hash"],
+            "next_join_time": state.get("next_join_time", 0),
+            "first_join_done": state.get("first_join_done", False)
+        }
+    try:
+        with open(STATE_FILE, 'w') as f:
+            json.dump(state_to_save, f)
+    except Exception as e:
+        logger.error(f"Error saving state: {e}")
 
 def get_user_data(user_id):
     if user_id not in user_data:
@@ -59,7 +105,9 @@ def get_user_data(user_id):
             "login_state": None,
             "phone": None,
             "phone_code_hash": None,
-            "task": None
+            "task": None,
+            "next_join_time": 0,
+            "first_join_done": False
         }
     return user_data[user_id]
 
@@ -75,8 +123,13 @@ def extract_hash(link: str) -> str:
     return link
 
 async def interruptible_sleep(seconds: int, user_id: int) -> bool:
-    for _ in range(seconds):
-        data = get_user_data(user_id)
+    data = get_user_data(user_id)
+    new_time = time.time() + seconds
+    if new_time > data.get("next_join_time", 0):
+        data["next_join_time"] = new_time
+        save_state()
+        
+    while time.time() < data.get("next_join_time", 0):
         if not data["loop_active"]:
             return False
         await asyncio.sleep(1)
@@ -99,7 +152,7 @@ async def show_menu(chat_id: int, user_id: int):
             "👋 **Welcome to the Automated Telegram Link Manager!**\n\n"
             "This bot allows you to automate joining private Telegram groups securely while bypassing ban filters.\n\n"
             "✨ **Features:**\n"
-            "• **Anti-Ban Protection:** Simulates human delays and caps daily joins at 12.\n"
+            "• **Anti-Ban Protection:** Simulates human delays and caps daily joins at 100.\n"
             "• **Smart Queue:** Add all your invite links and let the bot handle them in the background.\n"
             "• **Private & Secure:** Your session runs in a completely isolated container.\n\n"
             "To get started, you need to connect your Telegram account. Simply send /login to begin."
@@ -177,6 +230,7 @@ async def cancel_handler(event):
     user_id = event.sender_id
     data = get_user_data(user_id)
     data["login_state"] = None
+    save_state()
     await event.respond("❌ Action cancelled.")
 
 @bot_client.on(events.NewMessage())
@@ -216,6 +270,7 @@ async def message_handler(event):
         except Exception as e:
             await event.respond(f"❌ Error sending code: {e}")
             data["login_state"] = None
+            save_state()
             
     elif state == "WAITING_CODE":
         # Strip everything except numbers to safely parse formatted codes (like '1 2 3 4 5')
@@ -228,16 +283,20 @@ async def message_handler(event):
         try:
             await client.sign_in(data["phone"], code, phone_code_hash=data["phone_code_hash"])
             data["login_state"] = None
+            save_state()
             await event.respond("✅ **Login Successful!** Send /start to open your control panel.")
         except SessionPasswordNeededError:
             data["login_state"] = "WAITING_PASSWORD"
+            save_state()
             await event.respond("🔒 **Two-Step Verification Enabled.**\n\nPlease enter your 2FA password:")
         except (PhoneCodeInvalidError, PhoneCodeExpiredError):
             await event.respond("❌ Invalid or expired code. Please try /login again.")
             data["login_state"] = None
+            save_state()
         except Exception as e:
             await event.respond(f"❌ Login error: {e}")
             data["login_state"] = None
+            save_state()
             
     elif state == "WAITING_PASSWORD":
         password = event.text.strip()
@@ -245,6 +304,7 @@ async def message_handler(event):
         try:
             await client.sign_in(password=password)
             data["login_state"] = None
+            save_state()
             await event.respond("✅ **Login Successful!** Send /start to open your control panel.")
             try:
                 await event.delete() # Delete password from chat history
@@ -266,6 +326,7 @@ async def message_handler(event):
         else:
             await event.respond("❌ Invalid link format. Must contain 't.me'.")
         data["login_state"] = None
+        save_state()
         await show_menu(event.chat_id, user_id)
         
     elif state == "WAITING_REMOVE_LINK":
@@ -281,6 +342,7 @@ async def message_handler(event):
         except ValueError:
             await event.respond("❌ Please send a valid numeric index.")
         data["login_state"] = None
+        save_state()
         await show_menu(event.chat_id, user_id)
 
 @bot_client.on(events.CallbackQuery())
@@ -296,6 +358,7 @@ async def callback_handler(event):
     
     if cb_data == "add_link":
         data["login_state"] = "WAITING_ADD_LINK"
+        save_state()
         await event.respond("Send me the invite link to add (e.g., https://t.me/+...):")
         
     elif cb_data == "remove_link":
@@ -306,6 +369,7 @@ async def callback_handler(event):
         for i, l in enumerate(data["queue"]):
             msg += f"`{i}`: {l}\n"
         data["login_state"] = "WAITING_REMOVE_LINK"
+        save_state()
         await event.respond(msg)
         
     elif cb_data == "start_loop":
@@ -317,6 +381,7 @@ async def callback_handler(event):
             return
             
         data["loop_active"] = True
+        save_state()
         
         # Spawn the background task for this specific user
         if data["task"] is None or data["task"].done():
@@ -331,6 +396,8 @@ async def callback_handler(event):
             return
         data["loop_active"] = False
         data["first_join_done"] = False
+        data["next_join_time"] = 0
+        save_state()
         await event.respond("⏸️ **Loop Paused!** Will safely halt after the current sleep/action finishes.")
         await show_menu(event.chat_id, user_id)
         
@@ -351,6 +418,8 @@ async def callback_handler(event):
             data["client"] = None
         data["queue"] = []
         data["daily_joins"] = []
+        data["next_join_time"] = 0
+        save_state()
         # Delete session file if it exists
         session_file = f'sessions/user_{user_id}.session'
         if os.path.exists(session_file):
@@ -366,7 +435,6 @@ async def callback_handler(event):
 
 async def runner_engine(user_id: int, chat_id: int):
     data = get_user_data(user_id)
-    user_client = data["client"]
     
     while True:
         if not data["loop_active"] or not data["queue"]:
@@ -375,19 +443,50 @@ async def runner_engine(user_id: int, chat_id: int):
             await asyncio.sleep(5)
             continue
             
+        user_client = data.get("client")
+        if user_client is None:
+            session_file = f'sessions/user_{user_id}.session'
+            if os.path.exists(session_file):
+                user_client = TelegramClient(f'sessions/user_{user_id}', API_ID, API_HASH, flood_sleep_threshold=0, connection_retries=3)
+                await user_client.connect()
+                data["client"] = user_client
+            else:
+                await bot_client.send_message(chat_id, "⚠️ **Session missing.** Please /login again.")
+                data["loop_active"] = False
+                save_state()
+                break
+
+        now = time.time()
+        # Resume any interrupted long sleep from previous runs
+        if data.get("next_join_time", 0) > now + 2:
+            sleep_left = int(data["next_join_time"] - now)
+            if sleep_left > 10:
+                await bot_client.send_message(chat_id, f"💤 **Resuming Wait:** Sleeping for {sleep_left} more seconds before continuing.")
+            if not await interruptible_sleep(0, user_id):
+                break
+                
         now = time.time()
         data["daily_joins"] = [ts for ts in data["daily_joins"] if now - ts < 86400]
-            
+        
+        # Anti-ban limit check
+        if len(data["daily_joins"]) >= 100:
+            oldest = min(data["daily_joins"])
+            wait_time = int((oldest + 86400) - now)
+            if wait_time > 0:
+                await bot_client.send_message(chat_id, f"🛑 **Daily Limit Reached!** (100 joins/24h). Sleeping for {wait_time // 3600} hours and {(wait_time % 3600) // 60} minutes to prevent account bans.")
+                if not await interruptible_sleep(wait_time, user_id):
+                    break
+                continue
+                
         link = data["queue"][data["current_index"]]
         
         # Step A: Pre-Action Delay (Prevent Telegram Anti-Spam)
-        # If this is the first action after pressing Start, make it instant (2-5s)
-        # Otherwise, space out the next joins by 40 to 50 seconds
         if not data.get("first_join_done"):
             delay = random.randint(2, 5)
             data["first_join_done"] = True
+            save_state()
         else:
-            delay = random.randint(40, 50)
+            delay = random.randint(15, 30)
             
         await bot_client.send_message(chat_id, f"⏳ **Step A:** Sleeping for {delay} seconds before joining next link...")
         
@@ -406,10 +505,11 @@ async def runner_engine(user_id: int, chat_id: int):
                 raise Exception("Could not resolve Chat ID from the join request updates.")
             
             data["daily_joins"].append(time.time())
+            save_state()
             await bot_client.send_message(chat_id, f"✅ **Success:** Joined chat ID `{joined_chat_id}`")
             
-            # Step C: The Stay Simulation (Leave under 10-20s to prevent group owner bans)
-            stay_delay = random.randint(10, 20)
+            # Step C: The Stay Simulation
+            stay_delay = random.randint(10, 15)
             await bot_client.send_message(chat_id, f"🧍 **Step C:** Simulating stay. Waiting {stay_delay} seconds in group...")
             
             if not await interruptible_sleep(stay_delay, user_id):
@@ -419,19 +519,22 @@ async def runner_engine(user_id: int, chat_id: int):
             await user_client.delete_dialog(joined_chat_id)
             
             data["current_index"] += 1
+            save_state()
             
-            # LOOP COOLDOWN: If we completed a full cycle of all links, rest to prevent account ban
+            # LOOP COOLDOWN
             if data["current_index"] >= len(data["queue"]):
                 data["current_index"] = 0
+                save_state()
                 
-                cooldown = random.randint(900, 1800) # 15 to 30 minutes
-                await bot_client.send_message(chat_id, f"🛡️ **Loop Cooldown Activated:** Finished all {len(data['queue'])} links. Sleeping for {cooldown // 60} minutes to prevent an instant Telegram ban...")
+                cooldown = random.randint(120, 300) # 2 to 5 minutes
+                await bot_client.send_message(chat_id, f"🛡️ **Loop Cooldown Activated:** Finished all {len(data['queue'])} links. Sleeping for {cooldown // 60} minutes and {cooldown % 60} seconds before restarting loop...")
                 if not await interruptible_sleep(cooldown, user_id):
                     break
             
         except UserAlreadyParticipantError:
             await bot_client.send_message(chat_id, f"ℹ️ Already a participant of `{link}`. Skipping to next.")
             data["current_index"] = (data["current_index"] + 1) % len(data["queue"])
+            save_state()
             
         except FloodWaitError as e:
             sleep_time = e.seconds + 30
@@ -447,7 +550,8 @@ async def runner_engine(user_id: int, chat_id: int):
             await bot_client.send_message(chat_id, f"❌ **Error processing link {link}:**\n`{str(e)}`")
             if data["queue"]:
                 data["current_index"] = (data["current_index"] + 1) % len(data["queue"])
-            await asyncio.sleep(10)
+                save_state()
+            await interruptible_sleep(10, user_id)
 
 # ==========================================
 # MAIN EXECUTION & DUMMY SERVER
@@ -475,6 +579,13 @@ async def main():
     logger.info("Starting Bot Client...")
     await start_dummy_server()
     await bot_client.start(bot_token=BOT_TOKEN)
+    
+    load_state()
+    logger.info(f"Loaded state for {len(user_data)} users.")
+    for uid, data in user_data.items():
+        if data.get("loop_active"):
+            logger.info(f"Resuming background loop for user {uid}")
+            data["task"] = asyncio.create_task(runner_engine(uid, uid))
     
     # Set the Telegram Bot Menu Commands
     await bot_client(SetBotCommandsRequest(
