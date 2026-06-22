@@ -118,7 +118,7 @@ async def show_menu(chat_id: int, user_id: int):
         f"**🛡️ Personal Link Manager Dashboard**\n\n"
         f"**Status:** {status}\n"
         f"**Links in Queue:** {len(data['queue'])}\n"
-        f"**Daily Joins:** {len(data['daily_joins'])} / 12\n"
+        f"**Total Joins (24h):** {len(data['daily_joins'])}\n"
         f"**Current Index:** {data['current_index']}"
     )
     await bot_client.send_message(chat_id, text, buttons=keyboard)
@@ -368,25 +368,17 @@ async def runner_engine(user_id: int, chat_id: int):
             
         now = time.time()
         data["daily_joins"] = [ts for ts in data["daily_joins"] if now - ts < 86400]
-        
-        if len(data["daily_joins"]) >= 12:
-            data["loop_active"] = False
-            await bot_client.send_message(
-                chat_id, 
-                "⚠️ **Safety Alert:** Daily join ceiling (12) reached. Loop automatically paused to prevent bans."
-            )
-            break
             
         link = data["queue"][data["current_index"]]
         
         # Step A: Pre-Action Delay (Prevent Telegram Anti-Spam)
         # If this is the first action after pressing Start, make it instant (2-5s)
-        # Otherwise, space out the next joins by 1 to 3 minutes
+        # Otherwise, space out the next joins by 10 to 30 seconds for fast looping
         if not data.get("first_join_done"):
             delay = random.randint(2, 5)
             data["first_join_done"] = True
         else:
-            delay = random.randint(60, 180)
+            delay = random.randint(10, 30)
             
         await bot_client.send_message(chat_id, f"⏳ **Step A:** Sleeping for {delay} seconds before joining next link...")
         
