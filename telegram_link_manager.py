@@ -127,7 +127,14 @@ async def load_state():
                         "link_seen_users": state.get("link_seen_users", {}),
                         "active_links_count": state.get("active_links_count", 0),
                         "passive_links_count": state.get("passive_links_count", 0),
-                        "session_string": state.get("session_string", "")
+                        "session_string": state.get("session_string", ""),
+                        "paused_links": state.get("paused_links", []),
+                        "stopped_links": state.get("stopped_links", []),
+                        "queue_page": state.get("queue_page", 0),
+                        "editing_link": state.get("editing_link", None),
+                        "link_performance": state.get("link_performance", {}),
+                        "link_active_hours": state.get("link_active_hours", {}),
+                        "notification_mode": state.get("notification_mode", "ALL")
                     }
         except Exception as e:
             logger.error(f"Error loading state from local file: {e}")
@@ -153,7 +160,14 @@ async def _save_state_async():
             "link_seen_users": state.get("link_seen_users", {}),
             "active_links_count": state.get("active_links_count", 0),
             "passive_links_count": state.get("passive_links_count", 0),
-            "session_string": state.get("session_string", "")
+            "session_string": state.get("session_string", ""),
+            "paused_links": state.get("paused_links", []),
+            "stopped_links": state.get("stopped_links", []),
+            "queue_page": state.get("queue_page", 0),
+            "editing_link": state.get("editing_link", None),
+            "link_performance": state.get("link_performance", {}),
+            "link_active_hours": state.get("link_active_hours", {}),
+            "notification_mode": state.get("notification_mode", "ALL")
         }
         state_to_save[str(user_id)] = doc
         
@@ -192,7 +206,14 @@ def get_user_data(user_id):
             "link_last_action": {},
             "link_seen_users": {},
             "active_links_count": 0,
-            "passive_links_count": 0
+            "passive_links_count": 0,
+            "paused_links": [],
+            "stopped_links": [],
+            "queue_page": 0,
+            "editing_link": None,
+            "link_performance": {},
+            "link_active_hours": {},
+            "notification_mode": "ALL"
         }
     return user_data[user_id]
 
@@ -206,6 +227,29 @@ def extract_hash(link: str) -> str:
     if '/joinchat/' in link: return link.split('/joinchat/')[-1]
     if 't.me/' in link: return link.split('t.me/')[-1]
     return link
+
+def get_link_grade(checks: int, joins: int) -> str:
+    if checks < 5: return "🆕 (Init)"
+    if joins == 0 and checks >= 50: return "💀 F (Dead)"
+    if joins == 0: return "📉 D"
+    
+    ratio = joins / checks
+    if ratio >= 0.10: return "🔥 A+"
+    if ratio >= 0.05: return "⭐ A"
+    if ratio >= 0.02: return "📈 B"
+    if ratio >= 0.005: return "📊 C"
+    return "📉 D"
+
+async def send_alert(user_id: int, chat_id: int, msg: str, priority="NORMAL"):
+    data = get_user_data(user_id)
+    mode = data.get("notification_mode", "ALL")
+    
+    if mode == "SILENT":
+        return
+    if mode == "VIRAL_ONLY" and priority != "HIGH":
+        return
+        
+    await bot_client.send_message(chat_id, msg)
 
 async def interruptible_sleep(seconds: int, user_id: int) -> bool:
     data = get_user_data(user_id)
@@ -249,7 +293,8 @@ async def show_menu(chat_id: int, user_id: int, event=None):
     keyboard = [
         [Button.inline("➕ Add Link", b"add_link"), Button.inline("❌ Remove Link", b"remove_link")],
         [Button.inline("▶️ Start Engine", b"start_loop"), Button.inline("⏸️ Stop", b"stop_loop")],
-        [Button.inline("📊 Live Queue Stats", b"show_queue"), Button.inline("🚪 Logout", b"logout")]
+        [Button.inline("📊 Live Queue Stats", b"show_queue"), Button.inline("⚙️ Settings", b"settings_menu")],
+        [Button.inline("🚪 Logout", b"logout")]
     ]
     status = "🟢 ACTIVE" if data["loop_active"] else "🔴 PAUSED"
     
@@ -432,6 +477,95 @@ async def message_handler(event):
         data["login_state"] = None
         save_state()
         await show_menu(event.chat_id, user_id)
+        
+    elif state == "WAITING_EDIT_LINK":
+        link = event.text.strip()
+        idx = data.get("editing_link")
+        
+        if idx is not None and 0 <= idx < len(data["queue"]):
+            if 't.me' in link:
+                old_link = data["queue"][idx]
+                old_hash = extract_hash(old_link)
+                new_hash = extract_hash(link)
+                
+                # Replace link
+                data["queue"][idx] = link
+                
+                # Clean up old hash states
+                if old_hash in data.setdefault("paused_links", []): data["paused_links"].remove(old_hash)
+                if old_hash in data.setdefault("stopped_links", []): data["stopped_links"].remove(old_hash)
+                if old_hash in data.setdefault("link_schedule", {}): del data["link_schedule"][old_hash]
+                
+                await event.respond(f"✅ Link updated successfully!")
+            else:
+                await event.respond("❌ Invalid link format. Must contain 't.me'.")
+        else:
+            await event.respond("❌ Error updating link.")
+            
+        data["login_state"] = None
+        data["editing_link"] = None
+        save_state()
+        # Go back to queue instead of menu
+        class DummyEvent:
+            data = b"show_queue_refresh"
+            sender_id = user_id
+            chat_id = event.chat_id
+            async def edit(self, *args, **kwargs):
+                pass
+            async def answer(self, *args, **kwargs):
+                pass
+        await callback_handler(DummyEvent())
+        
+    elif state == "WAITING_SCHEDULE_START":
+        try:
+            hr = int(event.text.strip())
+            if 0 <= hr <= 23:
+                idx = data.get("editing_link")
+                if idx is not None and 0 <= idx < len(data["queue"]):
+                    hash_str = extract_hash(data["queue"][idx])
+                    data.setdefault("link_active_hours", {})[hash_str] = {"start": hr, "end": 0}
+                    data["login_state"] = "WAITING_SCHEDULE_END"
+                    save_state()
+                    await event.respond(f"✅ Start Hour set to **{hr:02d}:00**.\n\nNow send me the **End Hour** (0 to 23):\n*(Example: 17 for 5 PM)*")
+                else:
+                    await event.respond("❌ Link not found.")
+                    data["login_state"] = None
+                    save_state()
+            else:
+                await event.respond("❌ Invalid hour. Must be between 0 and 23.")
+        except ValueError:
+            await event.respond("❌ Please send a valid number between 0 and 23.")
+            
+    elif state == "WAITING_SCHEDULE_END":
+        try:
+            hr = int(event.text.strip())
+            if 0 <= hr <= 23:
+                idx = data.get("editing_link")
+                if idx is not None and 0 <= idx < len(data["queue"]):
+                    hash_str = extract_hash(data["queue"][idx])
+                    data["link_active_hours"][hash_str]["end"] = hr
+                    data["login_state"] = None
+                    save_state()
+                    await event.respond(f"✅ Schedule Saved! Link will only run between {data['link_active_hours'][hash_str]['start']:02d}:00 and {hr:02d}:00.")
+                    
+                    # Rerender manage link
+                    class DummyEvent:
+                        data = f"manage_link_{idx}".encode('utf-8')
+                        sender_id = user_id
+                        chat_id = event.chat_id
+                        async def edit(self, *args, **kwargs):
+                            pass
+                        async def answer(self, *args, **kwargs):
+                            pass
+                    await callback_handler(DummyEvent())
+                else:
+                    await event.respond("❌ Link not found.")
+                    data["login_state"] = None
+                    save_state()
+            else:
+                await event.respond("❌ Invalid hour. Must be between 0 and 23.")
+        except ValueError:
+            await event.respond("❌ Please send a valid number between 0 and 23.")
 
 @bot_client.on(events.CallbackQuery())
 async def callback_handler(event):
@@ -489,17 +623,80 @@ async def callback_handler(event):
         await event.answer("Engine Paused!", alert=True)
         await show_menu(event.chat_id, user_id, event=event)
         
+    elif cb_data == "settings_menu":
+        mode = data.get("notification_mode", "ALL")
+        msg = "**⚙️ Settings & Notifications**\n\nChoose how often the bot messages you:"
+        
+        btn_all = "✅ Everything" if mode == "ALL" else "Everything"
+        btn_viral = "✅ Viral Only" if mode == "VIRAL_ONLY" else "Viral Only"
+        btn_silent = "✅ Silent Mode" if mode == "SILENT" else "Silent Mode"
+        
+        keyboard = [
+            [Button.inline(btn_all, b"set_notif_ALL")],
+            [Button.inline(btn_viral, b"set_notif_VIRAL_ONLY")],
+            [Button.inline(btn_silent, b"set_notif_SILENT")],
+            [Button.inline("🔙 Back to Dashboard", b"back_to_menu")]
+        ]
+        await event.edit(msg, buttons=keyboard)
+        
+    elif cb_data.startswith("set_notif_"):
+        new_mode = cb_data.split("set_notif_")[1]
+        data["notification_mode"] = new_mode
+        save_state()
+        await event.answer("Settings Saved!", alert=True)
+        event.data = b"settings_menu"
+        await callback_handler(event)
+        
     elif cb_data == "back_to_menu":
         await show_menu(event.chat_id, user_id, event=event)
         
-    elif cb_data == "show_queue":
+    elif cb_data.startswith("show_queue"):
         if not data["queue"]:
             await event.answer("Queue is empty.", alert=True)
-        else:
-            msg = "**📊 Live Queue Stats:**\n\n"
-            now = time.time()
-            for i, l in enumerate(data["queue"]):
-                hash_str = extract_hash(l)
+            return
+            
+        page = data.get("queue_page", 0)
+        
+        if cb_data == "show_queue_next":
+            page += 1
+        elif cb_data == "show_queue_prev":
+            page -= 1
+        elif cb_data == "show_queue":
+            page = 0
+            
+        max_page = max(0, (len(data["queue"]) - 1) // 5)
+        page = max(0, min(page, max_page))
+        data["queue_page"] = page
+        save_state()
+        
+        start_idx = page * 5
+        end_idx = start_idx + 5
+        page_queue = data["queue"][start_idx:end_idx]
+        
+        msg = f"**📊 Live Queue Stats (Page {page+1}/{max_page+1}):**\n\n"
+        now = time.time()
+        
+        row_buttons = []
+        for i, l in enumerate(page_queue):
+            actual_idx = start_idx + i
+            hash_str = extract_hash(l)
+            
+            perf = data.get("link_performance", {}).get(hash_str, {"checks": 0, "joins": 0})
+            grade = get_link_grade(perf["checks"], perf["joins"]).split(' ')[0] # just get the emoji/letter
+            
+            # Check Schedule
+            sched_str = ""
+            active_hours = data.get("link_active_hours", {}).get(hash_str)
+            if active_hours:
+                start_hr = active_hours["start"]
+                end_hr = active_hours["end"]
+                sched_str = f" [🕒 {start_hr:02d}:00-{end_hr:02d}:00]"
+                
+            if hash_str in data.get("stopped_links", []):
+                status = "⏹️ Stopped"
+            elif hash_str in data.get("paused_links", []):
+                status = "⏸️ Paused"
+            else:
                 check_time = data.get("link_schedule", {}).get(hash_str, 0)
                 if check_time == 0:
                     status = "⏳ Wait"
@@ -508,12 +705,184 @@ async def callback_handler(event):
                 else:
                     wait_sec = int(check_time - now)
                     status = f"🕒 {wait_sec // 60}m {wait_sec % 60}s"
-                short_link = l[:25] + "..." if len(l) > 25 else l
-                msg += f"`{i}`: {short_link}\n   └ {status}\n\n"
+                    
+            short_link = l[:25] + "..." if len(l) > 25 else l
+            msg += f"`[{actual_idx + 1}]` {short_link}\n   └ Grade {grade} | {status}{sched_str}\n\n"
+            row_buttons.append(Button.inline(f"[{actual_idx + 1}]", f"manage_link_{actual_idx}".encode('utf-8')))
             
-            keyboard = [[Button.inline("🔙 Back", b"back_to_menu")]]
-            await event.edit(msg, buttons=keyboard, link_preview=False)
+        keyboard = []
+        if row_buttons:
+            # Chunk row_buttons into rows of 5
+            for j in range(0, len(row_buttons), 5):
+                keyboard.append(row_buttons[j:j+5])
+                
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(Button.inline("⬅️ Prev", b"show_queue_prev"))
+        if page < max_page:
+            nav_buttons.append(Button.inline("Next ➡️", b"show_queue_next"))
+        if nav_buttons:
+            keyboard.append(nav_buttons)
             
+        keyboard.append([Button.inline("🧹 Prune Dead Links", b"prune_dead_links")])
+        keyboard.append([Button.inline("🔙 Back to Dashboard", b"back_to_menu")])
+        await event.edit(msg, buttons=keyboard, link_preview=False)
+        
+    elif cb_data.startswith("manage_link_"):
+        idx = int(cb_data.split("_")[2])
+        if idx >= len(data["queue"]):
+            await event.answer("Link not found.", alert=True)
+            return
+            
+        l = data["queue"][idx]
+        hash_str = extract_hash(l)
+        
+        is_paused = hash_str in data.get("paused_links", [])
+        is_stopped = hash_str in data.get("stopped_links", [])
+        
+        perf = data.get("link_performance", {}).get(hash_str, {"checks": 0, "joins": 0})
+        grade = get_link_grade(perf["checks"], perf["joins"])
+        
+        active_hours = data.get("link_active_hours", {}).get(hash_str)
+        
+        msg = f"**⚙️ Manage Link `[{idx + 1}]`**\n\n"
+        msg += f"**URL:** {l}\n"
+        msg += f"**Grade:** {grade} `(Checks: {perf['checks']} | Joins: {perf['joins']})`\n"
+        
+        if active_hours:
+            msg += f"**Schedule (IST):** {active_hours['start']:02d}:00 to {active_hours['end']:02d}:00\n"
+            
+        if is_stopped:
+            msg += "**Status:** ⏹️ Stopped\n"
+        elif is_paused:
+            msg += "**Status:** ⏸️ Paused\n"
+        else:
+            now = time.time()
+            check_time = data.get("link_schedule", {}).get(hash_str, 0)
+            if check_time == 0:
+                msg += "**Status:** ⏳ Waiting for scan\n"
+            elif check_time <= now:
+                msg += "**Status:** 🔥 Ready to check\n"
+            else:
+                wait_sec = int(check_time - now)
+                msg += f"**Status:** 🕒 Next check in {wait_sec // 60}m {wait_sec % 60}s\n"
+                
+        pause_btn = Button.inline("▶️ Resume", f"resume_link_{idx}".encode('utf-8')) if is_paused else Button.inline("⏸️ Pause", f"pause_link_{idx}".encode('utf-8'))
+        stop_btn = Button.inline("▶️ Start", f"start_link_{idx}".encode('utf-8')) if is_stopped else Button.inline("⏹️ Stop", f"stop_link_{idx}".encode('utf-8'))
+        
+        sched_row = [Button.inline("🕒 Edit Schedule", f"set_sched_{idx}".encode('utf-8')), Button.inline("❌ Clear Schedule", f"clr_sched_{idx}".encode('utf-8'))] if active_hours else [Button.inline("🕒 Set Schedule", f"set_sched_{idx}".encode('utf-8'))]
+        
+        keyboard = [
+            [pause_btn, stop_btn],
+            sched_row,
+            [Button.inline("✏️ Change", f"edit_link_{idx}".encode('utf-8')), Button.inline("🗑️ Delete", f"del_link_{idx}".encode('utf-8'))],
+            [Button.inline("🔙 Back to Queue", b"show_queue_refresh")]
+        ]
+        await event.edit(msg, buttons=keyboard, link_preview=False)
+        
+    elif cb_data == "show_queue_refresh":
+        event.data = b"show_queue_refresh"
+        await callback_handler(event) # This will hit the startswith("show_queue") block and reload the current page
+
+    elif cb_data.startswith("pause_link_"):
+        idx = int(cb_data.split("_")[2])
+        hash_str = extract_hash(data["queue"][idx])
+        if hash_str not in data.setdefault("paused_links", []):
+            data["paused_links"].append(hash_str)
+        if hash_str in data.setdefault("stopped_links", []):
+            data["stopped_links"].remove(hash_str)
+        save_state()
+        event.data = f"manage_link_{idx}".encode('utf-8')
+        await callback_handler(event)
+
+    elif cb_data.startswith("resume_link_"):
+        idx = int(cb_data.split("_")[2])
+        hash_str = extract_hash(data["queue"][idx])
+        if hash_str in data.setdefault("paused_links", []):
+            data["paused_links"].remove(hash_str)
+        save_state()
+        event.data = f"manage_link_{idx}".encode('utf-8')
+        await callback_handler(event)
+
+    elif cb_data.startswith("stop_link_"):
+        idx = int(cb_data.split("_")[2])
+        hash_str = extract_hash(data["queue"][idx])
+        if hash_str not in data.setdefault("stopped_links", []):
+            data["stopped_links"].append(hash_str)
+        if hash_str in data.setdefault("paused_links", []):
+            data["paused_links"].remove(hash_str)
+        # Clear its schedule
+        if hash_str in data.setdefault("link_schedule", {}):
+            del data["link_schedule"][hash_str]
+        save_state()
+        event.data = f"manage_link_{idx}".encode('utf-8')
+        await callback_handler(event)
+
+    elif cb_data.startswith("start_link_"):
+        idx = int(cb_data.split("_")[2])
+        hash_str = extract_hash(data["queue"][idx])
+        if hash_str in data.setdefault("stopped_links", []):
+            data["stopped_links"].remove(hash_str)
+        # Reset schedule to check immediately
+        data.setdefault("link_schedule", {})[hash_str] = 0
+        save_state()
+        event.data = f"manage_link_{idx}".encode('utf-8')
+        await callback_handler(event)
+        
+    elif cb_data.startswith("del_link_"):
+        idx = int(cb_data.split("_")[2])
+        if idx < len(data["queue"]):
+            hash_str = extract_hash(data["queue"][idx])
+            data["queue"].pop(idx)
+            if hash_str in data.setdefault("stopped_links", []): data["stopped_links"].remove(hash_str)
+            if hash_str in data.setdefault("paused_links", []): data["paused_links"].remove(hash_str)
+            if hash_str in data.setdefault("link_schedule", {}): del data["link_schedule"][hash_str]
+            save_state()
+            await event.answer("Link deleted!", alert=True)
+        event.data = b"show_queue_refresh"
+        await callback_handler(event)
+
+    elif cb_data.startswith("edit_link_"):
+        idx = int(cb_data.split("_")[2])
+        data["login_state"] = "WAITING_EDIT_LINK"
+        data["editing_link"] = idx
+        save_state()
+        await event.respond(f"Send me the new invite link to replace Link `[{idx + 1}]`:")
+        
+    elif cb_data == "prune_dead_links":
+        queue_copy = list(data["queue"])
+        pruned_count = 0
+        for l in queue_copy:
+            hash_str = extract_hash(l)
+            perf = data.get("link_performance", {}).get(hash_str, {"checks": 0, "joins": 0})
+            if perf["joins"] == 0 and perf["checks"] >= 50:
+                data["queue"].remove(l)
+                if hash_str in data.setdefault("stopped_links", []): data["stopped_links"].remove(hash_str)
+                if hash_str in data.setdefault("paused_links", []): data["paused_links"].remove(hash_str)
+                if hash_str in data.setdefault("link_schedule", {}): del data["link_schedule"][hash_str]
+                if hash_str in data.setdefault("link_active_hours", {}): del data["link_active_hours"][hash_str]
+                pruned_count += 1
+        save_state()
+        await event.answer(f"Pruned {pruned_count} dead links!", alert=True)
+        event.data = b"show_queue_refresh"
+        await callback_handler(event)
+
+    elif cb_data.startswith("set_sched_"):
+        idx = int(cb_data.split("_")[2])
+        data["login_state"] = "WAITING_SCHEDULE_START"
+        data["editing_link"] = idx
+        save_state()
+        await event.respond(f"**🕒 Set Schedule for Link `[{idx + 1}]`**\n\nSend me the **Start Hour** (0 to 23 in IST time):\n*(Example: 9 for 9 AM)*")
+        
+    elif cb_data.startswith("clr_sched_"):
+        idx = int(cb_data.split("_")[2])
+        hash_str = extract_hash(data["queue"][idx])
+        if hash_str in data.setdefault("link_active_hours", {}):
+            del data["link_active_hours"][hash_str]
+        save_state()
+        event.data = f"manage_link_{idx}".encode('utf-8')
+        await callback_handler(event)
+        
     elif cb_data == "logout":
         data["loop_active"] = False
         if data["client"]:
@@ -554,7 +923,7 @@ async def runner_engine(user_id: int, chat_id: int):
                 await user_client.connect()
                 data["client"] = user_client
             else:
-                await bot_client.send_message(chat_id, "⚠️ **Session missing.** Please /login again.")
+                await send_alert(user_id, chat_id, "⚠️ **Session missing.** Please /login again.")
                 data["loop_active"] = False
                 save_state()
                 break
@@ -567,10 +936,10 @@ async def runner_engine(user_id: int, chat_id: int):
             if sleep_left > 7200: # Over 2 hours (likely the old daily limit bug)
                 data["next_join_time"] = 0
                 save_state()
-                await bot_client.send_message(chat_id, "🧹 **Cleared ghost sleep.** Resuming fast loop...")
+                await send_alert(user_id, chat_id, "🧹 **Cleared ghost sleep.** Resuming fast loop...")
             else:
                 if sleep_left > 10:
-                    await bot_client.send_message(chat_id, f"💤 **Resuming Wait:** Sleeping for {sleep_left // 60}m {sleep_left % 60}s before continuing.")
+                    await send_alert(user_id, chat_id, f"💤 **Resuming Wait:** Sleeping for {sleep_left // 60}m {sleep_left % 60}s before continuing.")
                 if not await interruptible_sleep(0, user_id):
                     break
         
@@ -578,8 +947,29 @@ async def runner_engine(user_id: int, chat_id: int):
         earliest_link = None
         earliest_time = float('inf')
         
+        # Current IST Time
+        ist = timezone(timedelta(hours=5, minutes=30))
+        now_ist = datetime.now(ist)
+        current_hour = now_ist.hour
+        
         for link in data["queue"]:
             hash_str = extract_hash(link)
+            if hash_str in data.get("paused_links", []) or hash_str in data.get("stopped_links", []):
+                continue
+                
+            # Check Custom IST Schedule
+            active_hours = data.get("link_active_hours", {}).get(hash_str)
+            if active_hours:
+                start_hr = active_hours["start"]
+                end_hr = active_hours["end"]
+                # Handle overnight ranges like 22 to 6
+                if start_hr < end_hr:
+                    is_active_now = start_hr <= current_hour < end_hr
+                else:
+                    is_active_now = current_hour >= start_hr or current_hour < end_hr
+                if not is_active_now:
+                    continue
+                    
             # Default to 0 so new links get checked immediately
             check_time = data.get("link_schedule", {}).get(hash_str, 0)
             if check_time < earliest_time:
@@ -587,9 +977,10 @@ async def runner_engine(user_id: int, chat_id: int):
                 earliest_link = link
                 
         if earliest_link is None:
-            # Fallback (shouldn't happen if queue is not empty)
-            earliest_link = data["queue"][0]
-            earliest_time = 0
+            # All links are paused or stopped
+            if not await interruptible_sleep(5, user_id):
+                break
+            continue
             
         # If the earliest link is still in the future, we sleep until it's ready
         if earliest_time > time.time():
@@ -598,7 +989,7 @@ async def runner_engine(user_id: int, chat_id: int):
             chunk = min(sleep_needed, 30)
             if sleep_needed > 30 and chunk == 30:
                 # Only spam the log if it's a long sleep
-                await bot_client.send_message(chat_id, f"💤 **Queue Sleeping:** No links ready. Sleeping for {sleep_needed // 60}m {sleep_needed % 60}s...")
+                await send_alert(user_id, chat_id, f"💤 **Queue Sleeping:** No links ready. Sleeping for {sleep_needed // 60}m {sleep_needed % 60}s...")
             if not await interruptible_sleep(chunk, user_id):
                 break
             continue # Restart the loop to re-evaluate schedules
@@ -617,6 +1008,10 @@ async def runner_engine(user_id: int, chat_id: int):
         
         try:
             invite_info = await user_client(CheckChatInviteRequest(hash_str))
+            
+            # Record analytics: 1 Check
+            perf = data.setdefault("link_performance", {}).setdefault(hash_str, {"checks": 0, "joins": 0})
+            perf["checks"] += 1
             
             # Extract participants count
             if hasattr(invite_info, 'participants_count'):
@@ -644,14 +1039,14 @@ async def runner_engine(user_id: int, chat_id: int):
                     if diff >= 10:
                         is_active_mode = True
                         data.setdefault("high_traffic_links", {})[hash_str] = time.time()
-                        await bot_client.send_message(chat_id, f"🔥 **Active Mode (High Traffic):** {diff} new users joined `{link}`. Engaging!")
+                        await send_alert(user_id, chat_id, f"🔥 **Active Mode (High Traffic):** {diff} new users joined `{link}`. Engaging!", priority="HIGH")
                     elif new_unique_users > 0 or (diff >= 1 and len(recent_ids) == 0):
                         if is_high_traffic:
                             is_active_mode = False
-                            await bot_client.send_message(chat_id, f"⏳ **Passive Mode (Throttling):** New users detected in `{link}`, waiting for 10 users because group is High Traffic.")
+                            await send_alert(user_id, chat_id, f"⏳ **Passive Mode (Throttling):** New users detected in `{link}`, waiting for 10 users because group is High Traffic.")
                         else:
                             is_active_mode = True
-                            await bot_client.send_message(chat_id, f"🔥 **Active Mode:** Genuine new users detected in `{link}`. Engaging!")
+                            await send_alert(user_id, chat_id, f"🔥 **Active Mode:** Genuine new users detected in `{link}`. Engaging!")
                     else:
                         is_active_mode = False
                         if diff > 0:
@@ -698,6 +1093,11 @@ async def runner_engine(user_id: int, chat_id: int):
                     raise Exception("Could not resolve Chat ID from the join request updates.")
                 
                 data["daily_joins"].append(time.time())
+                
+                # Record analytics: 1 Join
+                perf = data.setdefault("link_performance", {}).setdefault(hash_str, {"checks": 0, "joins": 0})
+                perf["joins"] += 1
+                
                 save_state()
                 
                 # Step C: The Stay Simulation
@@ -717,24 +1117,20 @@ async def runner_engine(user_id: int, chat_id: int):
                 
             except FloodWaitError as e:
                 sleep_time = e.seconds + 30
-                await bot_client.send_message(
-                    chat_id, 
-                    f"🚨 **FloodWaitError Caught!** Telegram asked to wait {e.seconds}s.\n"
-                    f"Sleeping for {sleep_time} seconds before resuming..."
-                )
+                await send_alert(user_id, chat_id, f"🚨 **FloodWaitError Caught!** Telegram asked to wait {e.seconds}s. Sleeping for {sleep_time} seconds before resuming...")
                 if not await interruptible_sleep(sleep_time, user_id):
                     break
                 
             except Exception as e:
-                await bot_client.send_message(chat_id, f"❌ **Error processing link {link}:**\n`{str(e)}`")
-                # Reschedule the bad link for a long time to prevent tight loop errors
+                await send_alert(user_id, chat_id, f"❌ **Error during join sequence for `{link}`:** {e}")
+                # Don't break, just continue to next link for a long time to prevent tight loop errors
                 data.setdefault("link_schedule", {})[hash_str] = time.time() + 3600 # 1 hour
                 save_state()
                 await interruptible_sleep(10, user_id)
                 continue
         else:
+            data.setdefault("passive_links_count", 0)
             data["passive_links_count"] += 1
-
         # Check for IST Night Time (1 AM to 5 AM)
         ist = timezone(timedelta(hours=5, minutes=30))
         now_ist = datetime.now(ist)
