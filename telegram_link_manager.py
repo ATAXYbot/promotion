@@ -544,11 +544,15 @@ async def runner_engine(user_id: int, chat_id: int):
         # DYNAMIC TRAFFIC CHECK
         # -----------------------------
         is_active_mode = True
+        participants_count = None
+        diff = 0
+        is_high_traffic = False
+        last_count = data.get("link_stats", {}).get(hash_str, 0)
+        
         try:
             invite_info = await user_client(CheckChatInviteRequest(hash_str))
             
             # Extract participants count
-            participants_count = None
             if hasattr(invite_info, 'participants_count'):
                 participants_count = invite_info.participants_count
             elif hasattr(invite_info, 'chat') and hasattr(invite_info.chat, 'participants_count'):
@@ -559,6 +563,7 @@ async def runner_engine(user_id: int, chat_id: int):
                 is_high_traffic = data.get("high_traffic_links", {}).get(hash_str, 0) > time.time() - 300 # Valid for 5 mins
                 
                 if last_count > 0:
+                    diff = participants_count - last_count
                     if diff >= 10:
                         is_active_mode = True
                         data.setdefault("high_traffic_links", {})[hash_str] = time.time()
