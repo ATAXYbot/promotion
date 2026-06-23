@@ -135,7 +135,12 @@ async def load_state():
                         "link_performance": state.get("link_performance", {}),
                         "link_active_hours": state.get("link_active_hours", {}),
                         "link_titles": state.get("link_titles", {}),
-                        "notification_mode": state.get("notification_mode", "ALL")
+                        "notification_mode": state.get("notification_mode", "ALL"),
+                        "global_seen_users": state.get("global_seen_users", {}),
+                        "global_blacklist": state.get("global_blacklist", []),
+                        "flood_history": state.get("flood_history", []),
+                        "panic_mode_until": state.get("panic_mode_until", 0),
+                        "hour_activity_log": state.get("hour_activity_log", {})
                     }
         except Exception as e:
             logger.error(f"Error loading state from local file: {e}")
@@ -169,7 +174,12 @@ async def _save_state_async():
             "link_performance": state.get("link_performance", {}),
             "link_active_hours": state.get("link_active_hours", {}),
             "link_titles": state.get("link_titles", {}),
-            "notification_mode": state.get("notification_mode", "ALL")
+            "notification_mode": state.get("notification_mode", "ALL"),
+            "global_seen_users": state.get("global_seen_users", {}),
+            "global_blacklist": state.get("global_blacklist", []),
+            "flood_history": state.get("flood_history", []),
+            "panic_mode_until": state.get("panic_mode_until", 0),
+            "hour_activity_log": state.get("hour_activity_log", {})
         }
         state_to_save[str(user_id)] = doc
         
@@ -216,7 +226,12 @@ def get_user_data(user_id):
             "link_performance": {},
             "link_active_hours": {},
             "link_titles": {},
-            "notification_mode": "ALL"
+            "notification_mode": "ALL",
+            "global_seen_users": {},
+            "global_blacklist": [],
+            "flood_history": [],
+            "panic_mode_until": 0,
+            "hour_activity_log": {}
         }
     return user_data[user_id]
 
@@ -936,6 +951,16 @@ async def runner_engine(user_id: int, chat_id: int):
 
         now = time.time()
         
+        # PANIC MODE CHECK
+        panic_until = data.get("panic_mode_until", 0)
+        if now < panic_until:
+            wait_sec = int(panic_until - now)
+            # Sleep in chunks to allow interruption
+            chunk = min(wait_sec, 60)
+            if not await interruptible_sleep(chunk, user_id):
+                break
+            continue
+        
         # Prevent ghost 24-hour sleeps from old limits locking up the loop
         if data.get("next_join_time", 0) > now + 2:
             sleep_left = int(data["next_join_time"] - now)
@@ -1037,7 +1062,22 @@ async def runner_engine(user_id: int, chat_id: int):
             new_unique_users = 0
             if hasattr(invite_info, 'participants') and invite_info.participants:
                 seen_users = data.get("link_seen_users", {}).get(hash_str, [])
+                global_blacklist = data.setdefault("global_blacklist", [])
+                global_seen = data.setdefault("global_seen_users", {})
+                
                 for p in invite_info.participants:
+                    # Hive Mind Spam Check
+                    if p.id in global_blacklist:
+                        continue # Completely ignore blacklisted user
+                        
+                    # Track globally
+                    user_groups = global_seen.setdefault(str(p.id), [])
+                    if hash_str not in user_groups:
+                        user_groups.append(hash_str)
+                        if len(user_groups) >= 3:
+                            global_blacklist.append(p.id)
+                            continue # Ignore this user, they are a spammer
+                            
                     recent_ids.append(p.id)
                     if p.id not in seen_users:
                         new_unique_users += 1
@@ -1112,10 +1152,20 @@ async def runner_engine(user_id: int, chat_id: int):
                 perf = data.setdefault("link_performance", {}).setdefault(hash_str, {"checks": 0, "joins": 0})
                 perf["joins"] += 1
                 
+                # Peak Hour AI Recording
+                current_hour = str(datetime.now(timezone(timedelta(hours=5, minutes=30))).hour)
+                data.setdefault("hour_activity_log", {}).setdefault(hash_str, {})
+                data["hour_activity_log"][hash_str][current_hour] = data["hour_activity_log"][hash_str].get(current_hour, 0) + 1
+                
                 save_state()
                 
-                # Step C: The Stay Simulation
-                stay_delay = random.randint(5, 15)
+                # Step C: The Stay Simulation (Deep Human Emulation)
+                if (participants_count and participants_count > 10000) or diff > 5:
+                    stay_delay = random.randint(120, 300) # 2-5 mins
+                elif (participants_count and participants_count > 1000) or diff > 0:
+                    stay_delay = random.randint(30, 60) # 30-60s
+                else:
+                    stay_delay = random.randint(5, 15) # Dead group, leave fast
                 
                 if not await interruptible_sleep(stay_delay, user_id):
                     break
@@ -1130,6 +1180,24 @@ async def runner_engine(user_id: int, chat_id: int):
                 continue
                 
             except FloodWaitError as e:
+                # Track flood history for Panic Mode
+                now = time.time()
+                history = data.setdefault("flood_history", [])
+                history.append(now)
+                # Prune > 15 mins
+                history = [t for t in history if now - t < 900]
+                data["flood_history"] = history
+                save_state()
+                
+                if len(history) >= 3:
+                    # Trigger PANIC MODE
+                    data["panic_mode_until"] = now + 7200 # 2 Hours
+                    data["flood_history"] = []
+                    save_state()
+                    await send_alert(user_id, chat_id, f"🚨 **PANIC MODE ACTIVATED!** Caught 3 API limits in 15 mins. Entire engine is going into Deep Sleep for 2 HOURS to cool down account safety flags.", priority="HIGH")
+                    if not await interruptible_sleep(10, user_id): break
+                    continue
+                    
                 sleep_time = e.seconds + 30
                 await send_alert(user_id, chat_id, f"🚨 **FloodWaitError Caught!** Telegram asked to wait {e.seconds}s. Sleeping for {sleep_time} seconds before resuming...")
                 if not await interruptible_sleep(sleep_time, user_id):
@@ -1163,6 +1231,18 @@ async def runner_engine(user_id: int, chat_id: int):
         elif "📈" in grade: grade_multiplier = 1.0
         elif "📊" in grade: grade_multiplier = 1.2
         elif "📉" in grade or "💀" in grade: grade_multiplier = 1.5
+        
+        # AI Peak Hour Multiplier
+        current_hour_str = str(now_ist.hour)
+        activity_log = data.get("hour_activity_log", {}).get(hash_str, {})
+        total_joins_for_link = sum(activity_log.values())
+        if total_joins_for_link >= 5: # Need enough data to make AI predictions
+            hour_joins = activity_log.get(current_hour_str, 0)
+            ratio = hour_joins / total_joins_for_link
+            if ratio >= 0.2: # Peak hour (>20% of traffic)
+                grade_multiplier *= 0.6 # Speed up drastically
+            elif ratio == 0: # Dead hour
+                grade_multiplier *= 1.3 # Slow down
 
         if participants_count is None:
             next_delay = 3600 # 1 hour for errors
