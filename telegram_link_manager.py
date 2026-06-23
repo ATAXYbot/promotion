@@ -140,7 +140,10 @@ async def load_state():
                         "global_blacklist": state.get("global_blacklist", []),
                         "flood_history": state.get("flood_history", []),
                         "panic_mode_until": state.get("panic_mode_until", 0),
-                        "hour_activity_log": state.get("hour_activity_log", {})
+                        "hour_activity_log": state.get("hour_activity_log", {}),
+                        "engine_uptime_start": state.get("engine_uptime_start", time.time()),
+                        "user_proxies": state.get("user_proxies", []),
+                        "hibernating_links": state.get("hibernating_links", [])
                     }
         except Exception as e:
             logger.error(f"Error loading state from local file: {e}")
@@ -179,7 +182,10 @@ async def _save_state_async():
             "global_blacklist": state.get("global_blacklist", []),
             "flood_history": state.get("flood_history", []),
             "panic_mode_until": state.get("panic_mode_until", 0),
-            "hour_activity_log": state.get("hour_activity_log", {})
+            "hour_activity_log": state.get("hour_activity_log", {}),
+            "engine_uptime_start": state.get("engine_uptime_start", time.time()),
+            "user_proxies": state.get("user_proxies", []),
+            "hibernating_links": state.get("hibernating_links", [])
         }
         state_to_save[str(user_id)] = doc
         
@@ -231,7 +237,10 @@ def get_user_data(user_id):
             "global_blacklist": [],
             "flood_history": [],
             "panic_mode_until": 0,
-            "hour_activity_log": {}
+            "hour_activity_log": {},
+            "engine_uptime_start": time.time(),
+            "user_proxies": [],
+            "hibernating_links": []
         }
     return user_data[user_id]
 
@@ -584,6 +593,51 @@ async def message_handler(event):
                 await event.respond("❌ Invalid hour. Must be between 0 and 23.")
         except ValueError:
             await event.respond("❌ Please send a valid number between 0 and 23.")
+            
+    elif state == "WAITING_ADD_PROXY":
+        proxy_str = event.text.strip()
+        try:
+            # Basic parser
+            if "://" not in proxy_str:
+                raise Exception("Missing protocol (e.g. socks5://)")
+            parts = proxy_str.split("://")
+            proto = parts[0].lower()
+            if proto not in ["socks5", "socks4", "http"]:
+                raise Exception("Unsupported protocol. Use socks5, socks4, or http.")
+            
+            auth_parts = parts[1].split(":")
+            if len(auth_parts) == 2: # IP:Port
+                ip, port = auth_parts
+                user, pw = None, None
+            elif len(auth_parts) == 4: # IP:Port:User:Pass
+                ip, port, user, pw = auth_parts
+            else:
+                raise Exception("Invalid format.")
+                
+            proxy_dict = {
+                "proxy_type": proto,
+                "addr": ip,
+                "port": int(port),
+                "rdns": True,
+                "username": user,
+                "password": pw
+            }
+            data.setdefault("user_proxies", []).append(proxy_dict)
+            await event.respond(f"✅ Added {proto.upper()} proxy: {ip}:{port}")
+        except Exception as e:
+            await event.respond(f"❌ Proxy error: {e}\nFormat: socks5://ip:port:user:pass")
+            
+        data["login_state"] = None
+        save_state()
+        
+        # Go back to proxy menu
+        class DummyEvent:
+            data = b"proxies_menu"
+            sender_id = user_id
+            chat_id = event.chat_id
+            async def edit(self, *args, **kwargs): pass
+            async def answer(self, *args, **kwargs): pass
+        await callback_handler(DummyEvent())
 
 @bot_client.on(events.CallbackQuery())
 async def callback_handler(event):
@@ -653,6 +707,7 @@ async def callback_handler(event):
             [Button.inline(btn_all, b"set_notif_ALL")],
             [Button.inline(btn_viral, b"set_notif_VIRAL_ONLY")],
             [Button.inline(btn_silent, b"set_notif_SILENT")],
+            [Button.inline("🌐 Proxy Manager", b"proxies_menu")],
             [Button.inline("🔙 Back to Dashboard", b"back_to_menu")]
         ]
         await event.edit(msg, buttons=keyboard)
@@ -667,6 +722,33 @@ async def callback_handler(event):
         
     elif cb_data == "back_to_menu":
         await show_menu(event.chat_id, user_id, event=event)
+        
+    elif cb_data == "proxies_menu":
+        proxies = data.get("user_proxies", [])
+        msg = f"**🌐 Proxy Manager (IP Rotation)**\n\nCurrent Proxies: {len(proxies)}\n\n"
+        if proxies:
+            for i, p in enumerate(proxies):
+                msg += f"`[{i}]` {p['proxy_type'].upper()} - {p['addr']}:{p['port']}\n"
+        else:
+            msg += "*No proxies added. Using Render Datacenter IP.*\n"
+            
+        keyboard = [
+            [Button.inline("➕ Add Proxy", b"add_proxy"), Button.inline("❌ Clear All", b"clear_proxies")],
+            [Button.inline("🔙 Back to Settings", b"settings_menu")]
+        ]
+        await event.edit(msg, buttons=keyboard)
+        
+    elif cb_data == "add_proxy":
+        data["login_state"] = "WAITING_ADD_PROXY"
+        save_state()
+        await event.respond("**🌐 Add Proxy**\n\nSend me your SOCKS5 or HTTP proxy in this format:\n`socks5://ip:port:username:password`\n\nOr without auth:\n`http://ip:port`")
+        
+    elif cb_data == "clear_proxies":
+        data["user_proxies"] = []
+        save_state()
+        await event.answer("All proxies cleared!", alert=True)
+        event.data = b"proxies_menu"
+        await callback_handler(event)
         
     elif cb_data.startswith("show_queue"):
         if not data["queue"]:
@@ -714,6 +796,8 @@ async def callback_handler(event):
                 status = "⏹️ Stopped"
             elif hash_str in data.get("paused_links", []):
                 status = "⏸️ Paused"
+            elif hash_str in data.get("hibernating_links", []):
+                status = "💤 Hibernating (Auto-Paused)"
             else:
                 check_time = data.get("link_schedule", {}).get(hash_str, 0)
                 if check_time == 0:
@@ -759,6 +843,8 @@ async def callback_handler(event):
         is_paused = hash_str in data.get("paused_links", [])
         is_stopped = hash_str in data.get("stopped_links", [])
         
+        is_hibernating = hash_str in data.get("hibernating_links", [])
+        
         perf = data.get("link_performance", {}).get(hash_str, {"checks": 0, "joins": 0})
         grade = get_link_grade(perf["checks"], perf["joins"])
         
@@ -777,6 +863,8 @@ async def callback_handler(event):
             msg += "**Status:** ⏹️ Stopped\n"
         elif is_paused:
             msg += "**Status:** ⏸️ Paused\n"
+        elif is_hibernating:
+            msg += "**Status:** 💤 Hibernating (Waiting for Sonar Ping)\n"
         else:
             now = time.time()
             check_time = data.get("link_schedule", {}).get(hash_str, 0)
@@ -940,7 +1028,14 @@ async def runner_engine(user_id: int, chat_id: int):
         if user_client is None:
             session_file = f'sessions/user_{user_id}.session'
             if os.path.exists(session_file):
-                user_client = TelegramClient(f'sessions/user_{user_id}', API_ID, API_HASH, flood_sleep_threshold=0, connection_retries=3)
+                proxies = data.get("user_proxies", [])
+                client_kwargs = {"flood_sleep_threshold": 0, "connection_retries": 3}
+                if proxies:
+                    p = random.choice(proxies)
+                    client_kwargs["proxy"] = p
+                    await send_alert(user_id, chat_id, f"🌐 **Proxy Connected:** Engine started on {p['proxy_type'].upper()} proxy ({p['addr']})")
+                    
+                user_client = TelegramClient(f'sessions/user_{user_id}', API_ID, API_HASH, **client_kwargs)
                 await user_client.connect()
                 data["client"] = user_client
             else:
@@ -960,6 +1055,36 @@ async def runner_engine(user_id: int, chat_id: int):
             if not await interruptible_sleep(chunk, user_id):
                 break
             continue
+            
+        # SMART MICRO-NAPS (Rush-Hour Aware Stutter Stepping)
+        uptime = now - data.setdefault("engine_uptime_start", now)
+        # Random trigger between 45 to 90 mins (2700 to 5400 seconds)
+        if uptime > random.randint(2700, 5400):
+            # Check Rush Hour override
+            ist = timezone(timedelta(hours=5, minutes=30))
+            now_ist = datetime.now(ist)
+            current_hour_str = str(now_ist.hour)
+            
+            is_rush_hour = False
+            for hash_str, logs in data.get("hour_activity_log", {}).items():
+                total = sum(logs.values())
+                if total >= 5:
+                    hr_joins = logs.get(current_hour_str, 0)
+                    if hr_joins / total >= 0.2:
+                        is_rush_hour = True
+                        break
+                        
+            if is_rush_hour:
+                await send_alert(user_id, chat_id, "🔥 **AI Overdrive:** Canceled scheduled Micro-Nap because it's Rush Hour. Running at 100% capacity!")
+                data["engine_uptime_start"] = now # Reset uptime to check again later
+                save_state()
+            else:
+                nap_sec = random.randint(120, 480) # 2 to 8 mins
+                await send_alert(user_id, chat_id, f"☕ **Micro-Nap Triggered:** Taking a deeply randomized break for {nap_sec // 60}m {nap_sec % 60}s to break API heartbeat...")
+                if not await interruptible_sleep(nap_sec, user_id):
+                    break
+                data["engine_uptime_start"] = time.time()
+                save_state()
         
         # Prevent ghost 24-hour sleeps from old limits locking up the loop
         if data.get("next_join_time", 0) > now + 2:
@@ -1152,6 +1277,12 @@ async def runner_engine(user_id: int, chat_id: int):
                 perf = data.setdefault("link_performance", {}).setdefault(hash_str, {"checks": 0, "joins": 0})
                 perf["joins"] += 1
                 
+                # RESURRECTION FROM HIBERNATION
+                if hash_str in data.get("hibernating_links", []):
+                    data["hibernating_links"].remove(hash_str)
+                    perf["checks"] = 0 # Reset checks so grade is back to 🆕
+                    await send_alert(user_id, chat_id, f"🎉 **RESURRECTED:** `{link}` was dead but just got traffic! Removing from Hibernation and pushing to Active Queue!", priority="HIGH")
+                    
                 # Peak Hour AI Recording
                 current_hour = str(datetime.now(timezone(timedelta(hours=5, minutes=30))).hour)
                 data.setdefault("hour_activity_log", {}).setdefault(hash_str, {})
@@ -1167,7 +1298,27 @@ async def runner_engine(user_id: int, chat_id: int):
                 else:
                     stay_delay = random.randint(5, 15) # Dead group, leave fast
                 
-                if not await interruptible_sleep(stay_delay, user_id):
+                # Sleep half the stay duration
+                half_delay = stay_delay // 2
+                if not await interruptible_sleep(half_delay, user_id):
+                    break
+                    
+                # GHOST READING EMULATION
+                try:
+                    history = await user_client.get_messages(joined_chat_id, limit=15)
+                    if history:
+                        await user_client.send_read_acknowledge(joined_chat_id, history[0])
+                        
+                    # 50% chance to simulate typing
+                    if random.random() > 0.5:
+                        async with user_client.action(joined_chat_id, 'typing'):
+                            await interruptible_sleep(random.randint(2, 4), user_id)
+                except Exception:
+                    pass # Ignore read/typing errors, we are just pretending
+                    
+                # Sleep the remaining duration
+                rem_delay = stay_delay - half_delay
+                if not await interruptible_sleep(rem_delay, user_id):
                     break
                     
                 await user_client.delete_dialog(joined_chat_id)
@@ -1247,6 +1398,13 @@ async def runner_engine(user_id: int, chat_id: int):
         if participants_count is None:
             next_delay = 3600 # 1 hour for errors
             traffic_str = "❌ Error/Invalid"
+        elif "💀" in grade:
+            # HIBERNATION PROTOCOL
+            next_delay = 86400 # 24 hours
+            traffic_str = "💤 Hibernating (Sonar Ping pending)"
+            if hash_str not in data.setdefault("hibernating_links", []):
+                data["hibernating_links"].append(hash_str)
+                await send_alert(user_id, chat_id, f"🥶 **HIBERNATING `{link}`:** Group is dead (Grade F). Auto-Pausing to save engine power. Will send a Sonar Ping tomorrow.")
         elif is_night_mode:
             # Smart Night Mode: 25 to 40 mins base, scaled by grade
             base_night = random.randint(1500, 2400) # 25 to 40 mins
