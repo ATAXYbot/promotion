@@ -495,6 +495,19 @@ async def runner_engine(user_id: int, chat_id: int):
 
         now = time.time()
         
+        # Prevent ghost 24-hour sleeps from old limits locking up the loop
+        if data.get("next_join_time", 0) > now + 2:
+            sleep_left = int(data["next_join_time"] - now)
+            if sleep_left > 7200: # Over 2 hours (likely the old daily limit bug)
+                data["next_join_time"] = 0
+                save_state()
+                await bot_client.send_message(chat_id, "🧹 **Cleared ghost sleep.** Resuming fast loop...")
+            else:
+                if sleep_left > 10:
+                    await bot_client.send_message(chat_id, f"💤 **Resuming Wait:** Sleeping for {sleep_left // 60}m {sleep_left % 60}s before continuing.")
+                if not await interruptible_sleep(0, user_id):
+                    break
+        
         # Priority Scheduling Logic
         earliest_link = None
         earliest_time = float('inf')
@@ -562,11 +575,11 @@ async def runner_engine(user_id: int, chat_id: int):
                         await bot_client.send_message(chat_id, f"📉 **Passive Mode:** Only {diff} new users joined `{link}`. Skipping join.")
                 else:
                     # First time checking
-                    is_active_mode = False
-                    await bot_client.send_message(chat_id, f"👀 **Initial Scan:** First time checking `{link}` ({participants_count} members). Setting baseline, no action taken yet.")
+                    is_active_mode = True
+                    await bot_client.send_message(chat_id, f"🔥 **Active Mode:** First time checking `{link}` ({participants_count} members). Engaging!")
                 
-                # Update stats ONLY when we actually take action OR if it's the first scan
-                if is_active_mode or last_count == 0:
+                # Update stats ONLY when we actually take action
+                if is_active_mode:
                     data["link_stats"][hash_str] = participants_count
                     save_state()
         except Exception as e:
@@ -651,10 +664,7 @@ async def runner_engine(user_id: int, chat_id: int):
                 next_delay = random.randint(240, 360) # 4 to 6 mins
                 traffic_str = "🚶 Normal Traffic"
         else:
-            if last_count == 0:
-                next_delay = random.randint(60, 180) # 1 to 3 mins
-                traffic_str = "👀 Initial Scan"
-            elif last_count > 0 and diff < 1:
+            if last_count > 0 and diff < 1:
                 next_delay = random.randint(420, 540) # 7 to 9 mins
                 traffic_str = "💤 Dead Traffic"
             else:
