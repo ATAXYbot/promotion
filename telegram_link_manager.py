@@ -13,6 +13,7 @@ import random
 import time
 import re
 import json
+from datetime import datetime, timezone, timedelta
 from motor.motor_asyncio import AsyncIOMotorClient
 from telethon.sessions import StringSession
 
@@ -31,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 API_ID = int(os.environ.get("TG_API_ID", "20543583"))  # <--- SET YOUR API_ID HERE
 API_HASH = os.environ.get("TG_API_HASH", "505e57baf9b48347e18446d352cacce3")  # <--- SET YOUR API_HASH HERE
-BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "8925952271:AAG4krblXEPNWXX6g7oOdkrFMt8qkU4OFGA")
+BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "8925952271:AAGScKJAK1sIA7c8JXCUqmbjQm05B3WOMNo")
 
 # Create and set a global event loop before Telethon initializes
 try:
@@ -208,6 +209,7 @@ def extract_hash(link: str) -> str:
 
 async def interruptible_sleep(seconds: int, user_id: int) -> bool:
     data = get_user_data(user_id)
+    if not data["loop_active"]: return False
     new_time = time.time() + seconds
     if new_time > data.get("next_join_time", 0):
         data["next_join_time"] = new_time
@@ -217,9 +219,11 @@ async def interruptible_sleep(seconds: int, user_id: int) -> bool:
         if not data["loop_active"]:
             return False
         await asyncio.sleep(1)
+        
+    if not data["loop_active"]: return False
     return True
 
-async def show_menu(chat_id: int, user_id: int):
+async def show_menu(chat_id: int, user_id: int, event=None):
     data = get_user_data(user_id)
     
     # Lazy load existing session from disk if bot was restarted
@@ -234,21 +238,18 @@ async def show_menu(chat_id: int, user_id: int):
     if data["client"] is None or not await data["client"].is_user_authorized():
         welcome_text = (
             "👋 **Welcome to the Automated Telegram Link Manager!**\n\n"
-            "This bot operates a massive **24/7 Unlimited Priority Queue** to manage joining private Telegram groups securely and autonomously.\n\n"
-            "✨ **How the Smart Engine Works:**\n"
-            "• **🧠 Priority Scheduling:** You can add unlimited links. The bot analyzes the traffic of every group in real-time. It schedules checks for dead groups every 7-9 mins, active groups every 4-6 mins, and viral groups every 1-3 mins. It never wastes time on dead links.\n"
-            "• **🛡️ Anti-Ban (The <10 Min Guarantee):** The bot enforces a strict 3-5 second invisible delay between every single action. Because of this mathematically calculated delay, it guarantees that as long as your queue is under 150 links, the bot will take action on any new user joining *under 10 minutes* while keeping your account 100% safe from Telegram Anti-Flood filters!\n"
-            "• **🛑 High Traffic Throttling:** If a viral group suddenly gets 50 users joining at once, the bot protects your account by waiting for batches of 10 users to pile up before joining, getting you maximum output without risking a ban.\n"
-            "• **♾️ 24/7 Infinite Loop:** Once you start the loop, you can close Telegram entirely. The bot will keep running in the background infinitely until you manually stop it.\n\n"
             "To get started, you need to connect your Telegram account. Simply send `/login` to begin."
         )
-        await bot_client.send_message(chat_id, welcome_text)
+        if event and hasattr(event, 'edit'):
+            await event.edit(welcome_text)
+        else:
+            await bot_client.send_message(chat_id, welcome_text)
         return
 
     keyboard = [
         [Button.inline("➕ Add Link", b"add_link"), Button.inline("❌ Remove Link", b"remove_link")],
-        [Button.inline("▶️ Start Loop", b"start_loop"), Button.inline("⏸️ Stop Loop", b"stop_loop")],
-        [Button.inline("📋 Show Queue", b"show_queue"), Button.inline("🚪 Logout", b"logout")]
+        [Button.inline("▶️ Start Engine", b"start_loop"), Button.inline("⏸️ Stop", b"stop_loop")],
+        [Button.inline("📊 Live Queue Stats", b"show_queue"), Button.inline("🚪 Logout", b"logout")]
     ]
     status = "🟢 ACTIVE" if data["loop_active"] else "🔴 PAUSED"
     
@@ -256,13 +257,15 @@ async def show_menu(chat_id: int, user_id: int):
     data["daily_joins"] = [ts for ts in data["daily_joins"] if now - ts < 86400]
     
     text = (
-        f"**🛡️ Personal Link Manager Dashboard**\n\n"
-        f"**Status:** {status}\n"
-        f"**Links in Queue:** {len(data['queue'])}\n"
-        f"**Total Joins (24h):** {len(data['daily_joins'])}\n"
-        f"**Current Index:** {data['current_index']}"
+        f"**🚀 Personal Link Manager Dashboard**\n\n"
+        f"**Engine:** {status}\n"
+        f"**Queue:** {len(data['queue'])} Links\n"
+        f"**Joins (24h):** {len(data['daily_joins'])}"
     )
-    await bot_client.send_message(chat_id, text, buttons=keyboard)
+    if event and hasattr(event, 'edit'):
+        await event.edit(text, buttons=keyboard)
+    else:
+        await bot_client.send_message(chat_id, text, buttons=keyboard)
 
 # ==========================================
 # BOT INTERFACE & LOGIN FLOW
@@ -462,7 +465,7 @@ async def callback_handler(event):
             await event.answer("Cannot start. Queue is empty!", alert=True)
             return
         if data["loop_active"]:
-            await event.answer("Loop is already running!", alert=True)
+            await event.answer("Engine is already running!", alert=True)
             return
             
         data["loop_active"] = True
@@ -472,52 +475,44 @@ async def callback_handler(event):
         if data["task"] is None or data["task"].done():
             data["task"] = asyncio.create_task(runner_engine(user_id, event.chat_id))
             
-        detailed_msg = (
-            "▶️ **Loop Activated! Here is how your bot operates 24/7:**\n\n"
-            "🧠 **Smart Priority Queue**\n"
-            "Your bot tracks every single link individually instead of just going in a circle. It assigns 'appointment times' to check each link based on how popular they are:\n"
-            "• 🔥 **Viral Groups (10+ joins):** Checked every 1 to 3 minutes.\n"
-            "• 🚶 **Active Groups (1-9 joins):** Checked every 4 to 6 minutes.\n"
-            "• 💤 **Dead Groups (0 joins):** Ignored for 7 to 9 minutes to save API limits.\n\n"
-            "🛡️ **Anti-Ban System (The <10 Minute Guarantee)**\n"
-            "To prevent Telegram from banning you for 'peeking' at groups too fast, the bot forces a strict **3 to 5-second invisible delay** between every single action. "
-            "This means as long as you have less than **150 links** in your queue, the bot guarantees it will take action on any new user joining *under 10 minutes*!\n\n"
-            "🛑 **High Traffic Throttling**\n"
-            "If a group suddenly gets 50+ users joining at once, the bot won't join 50 times and get your account banned. It will throttle itself, wait for batches of 10 users to pile up, and then join once to get maximum exposure for minimum risk.\n\n"
-            "The bot is now running infinitely in the background. You can close Telegram, log out, or turn off your device! It will run 24/7 until you press **Stop Loop**."
-        )
-        await event.respond(detailed_msg)
-        await show_menu(event.chat_id, user_id)
+        await event.answer("Engine Started! Running silently in background.", alert=True)
+        await show_menu(event.chat_id, user_id, event=event)
         
     elif cb_data == "stop_loop":
         if not data["loop_active"]:
-            await event.answer("Loop is already stopped!", alert=True)
+            await event.answer("Engine is already stopped!", alert=True)
             return
         data["loop_active"] = False
         data["first_join_done"] = False
         data["next_join_time"] = 0
         save_state()
-        await event.respond("⏸️ **Loop Paused!** Will safely halt after the current sleep/action finishes.")
-        await show_menu(event.chat_id, user_id)
+        await event.answer("Engine Paused!", alert=True)
+        await show_menu(event.chat_id, user_id, event=event)
+        
+    elif cb_data == "back_to_menu":
+        await show_menu(event.chat_id, user_id, event=event)
         
     elif cb_data == "show_queue":
         if not data["queue"]:
-            await event.respond("Queue is currently empty.")
+            await event.answer("Queue is empty.", alert=True)
         else:
-            msg = "**📋 Smart Queue Status:**\n\n"
+            msg = "**📊 Live Queue Stats:**\n\n"
             now = time.time()
             for i, l in enumerate(data["queue"]):
                 hash_str = extract_hash(l)
                 check_time = data.get("link_schedule", {}).get(hash_str, 0)
                 if check_time == 0:
-                    status = "⏳ Waiting for initial scan"
+                    status = "⏳ Wait"
                 elif check_time <= now:
-                    status = "🔥 Ready to check now"
+                    status = "🔥 Ready"
                 else:
                     wait_sec = int(check_time - now)
-                    status = f"🕒 Next check in {wait_sec // 60}m {wait_sec % 60}s"
-                msg += f"`{i}`: {l}\n   └ {status}\n\n"
-            await event.respond(msg, link_preview=False)
+                    status = f"🕒 {wait_sec // 60}m {wait_sec % 60}s"
+                short_link = l[:25] + "..." if len(l) > 25 else l
+                msg += f"`{i}`: {short_link}\n   └ {status}\n\n"
+            
+            keyboard = [[Button.inline("🔙 Back", b"back_to_menu")]]
+            await event.edit(msg, buttons=keyboard, link_preview=False)
             
     elif cb_data == "logout":
         data["loop_active"] = False
@@ -691,14 +686,10 @@ async def runner_engine(user_id: int, chat_id: int):
             else:
                 delay = random.randint(5, 15)
                 
-            await bot_client.send_message(chat_id, f"⏳ **Step A:** Sleeping for {delay} seconds before joining next link...")
-            
             if not await interruptible_sleep(delay, user_id):
                 break
                 
             try:
-                await bot_client.send_message(chat_id, f"🔄 **Step B:** Attempting to join: {link}")
-                
                 updates = await user_client(ImportChatInviteRequest(hash_str))
                 
                 if updates.chats:
@@ -708,16 +699,13 @@ async def runner_engine(user_id: int, chat_id: int):
                 
                 data["daily_joins"].append(time.time())
                 save_state()
-                await bot_client.send_message(chat_id, f"✅ **Success:** Joined chat ID `{joined_chat_id}`")
                 
                 # Step C: The Stay Simulation
                 stay_delay = random.randint(5, 15)
-                await bot_client.send_message(chat_id, f"🧍 **Step C:** Simulating stay. Waiting {stay_delay} seconds in group...")
                 
                 if not await interruptible_sleep(stay_delay, user_id):
                     break
                     
-                await bot_client.send_message(chat_id, f"👋 **Step D:** Leaving chat ID `{joined_chat_id}`")
                 await user_client.delete_dialog(joined_chat_id)
                 
             except UserAlreadyParticipantError:
@@ -747,10 +735,18 @@ async def runner_engine(user_id: int, chat_id: int):
         else:
             data["passive_links_count"] += 1
 
+        # Check for IST Night Time (1 AM to 5 AM)
+        ist = timezone(timedelta(hours=5, minutes=30))
+        now_ist = datetime.now(ist)
+        is_night_mode = 1 <= now_ist.hour < 5
+
         # Determine reschedule delay based on diff and active mode
         if participants_count is None:
             next_delay = 3600 # 1 hour for errors
             traffic_str = "❌ Error/Invalid"
+        elif is_night_mode:
+            next_delay = random.randint(1500, 1800) # 25 to 30 mins
+            traffic_str = "🌙 Night Mode (Slow Peek)"
         elif is_active_mode:
             if is_high_traffic or diff >= 10:
                 next_delay = random.randint(240, 360) # 4 to 6 mins
@@ -773,7 +769,7 @@ async def runner_engine(user_id: int, chat_id: int):
             await bot_client.send_message(chat_id, f"📅 **Rescheduled `{link}`:** ({traffic_str}) Next check in {next_delay // 60}m {next_delay % 60}s.")
 
         # Minimum global delay to prevent API Anti-Flood Warning from Peeking
-        anti_flood_delay = random.randint(3, 5)
+        anti_flood_delay = random.randint(25, 35)
         if not await interruptible_sleep(anti_flood_delay, user_id):
             break
 
