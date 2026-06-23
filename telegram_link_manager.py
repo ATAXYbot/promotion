@@ -13,6 +13,8 @@ import random
 import time
 import re
 import json
+from motor.motor_asyncio import AsyncIOMotorClient
+from telethon.sessions import StringSession
 
 from telethon import TelegramClient, events, Button
 from telethon.errors import (
@@ -42,6 +44,18 @@ except RuntimeError:
 if not os.path.exists("sessions"):
     os.makedirs("sessions")
 
+# MongoDB Setup
+MONGO_URI = os.environ.get("MONGO_URI", "")
+db_client = None
+db_collection = None
+
+if MONGO_URI:
+    db_client = AsyncIOMotorClient(MONGO_URI)
+    db_collection = db_client.get_database("telegram_bot").get_collection("users")
+    logger.info("MongoDB initialized for persistent storage.")
+else:
+    logger.warning("MONGO_URI not found. State will not survive Render deployments.")
+
 bot_client = TelegramClient('sessions/control_bot', API_ID, API_HASH)
 
 # ==========================================
@@ -50,9 +64,44 @@ bot_client = TelegramClient('sessions/control_bot', API_ID, API_HASH)
 user_data = {}
 STATE_FILE = "sessions/state.json"
 
-def load_state():
+async def load_state():
     global user_data
-    if os.path.exists(STATE_FILE):
+    loaded_from_db = False
+    
+    if db_collection is not None:
+        try:
+            cursor = db_collection.find({})
+            async for doc in cursor:
+                str_user_id = doc.get("user_id")
+                if not str_user_id: continue
+                user_id = int(str_user_id)
+                user_data[user_id] = {
+                    "client": None,
+                    "task": None,
+                    "queue": doc.get("queue", []),
+                    "current_index": doc.get("current_index", 0),
+                    "loop_active": doc.get("loop_active", False),
+                    "daily_joins": doc.get("daily_joins", []),
+                    "login_state": doc.get("login_state", None),
+                    "phone": doc.get("phone", None),
+                    "phone_code_hash": doc.get("phone_code_hash", None),
+                    "next_join_time": doc.get("next_join_time", 0),
+                    "first_join_done": doc.get("first_join_done", False),
+                    "link_stats": doc.get("link_stats", {}),
+                    "high_traffic_links": doc.get("high_traffic_links", {}),
+                    "link_schedule": doc.get("link_schedule", {}),
+                    "link_last_action": doc.get("link_last_action", {}),
+                    "link_seen_users": doc.get("link_seen_users", {}),
+                    "active_links_count": doc.get("active_links_count", 0),
+                    "passive_links_count": doc.get("passive_links_count", 0),
+                    "session_string": doc.get("session_string", "")
+                }
+            loaded_from_db = True
+            logger.info("State successfully loaded from MongoDB.")
+        except Exception as e:
+            logger.error(f"Error loading state from MongoDB: {e}")
+            
+    if not loaded_from_db and os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, 'r') as f:
                 data = json.load(f)
@@ -73,16 +122,20 @@ def load_state():
                         "link_stats": state.get("link_stats", {}),
                         "high_traffic_links": state.get("high_traffic_links", {}),
                         "link_schedule": state.get("link_schedule", {}),
+                        "link_last_action": state.get("link_last_action", {}),
+                        "link_seen_users": state.get("link_seen_users", {}),
                         "active_links_count": state.get("active_links_count", 0),
-                        "passive_links_count": state.get("passive_links_count", 0)
+                        "passive_links_count": state.get("passive_links_count", 0),
+                        "session_string": state.get("session_string", "")
                     }
         except Exception as e:
-            logger.error(f"Error loading state: {e}")
+            logger.error(f"Error loading state from local file: {e}")
 
-def save_state():
+async def _save_state_async():
     state_to_save = {}
     for user_id, state in user_data.items():
-        state_to_save[str(user_id)] = {
+        doc = {
+            "user_id": str(user_id),
             "queue": state["queue"],
             "current_index": state["current_index"],
             "loop_active": state["loop_active"],
@@ -95,14 +148,28 @@ def save_state():
             "link_stats": state.get("link_stats", {}),
             "high_traffic_links": state.get("high_traffic_links", {}),
             "link_schedule": state.get("link_schedule", {}),
+            "link_last_action": state.get("link_last_action", {}),
+            "link_seen_users": state.get("link_seen_users", {}),
             "active_links_count": state.get("active_links_count", 0),
-            "passive_links_count": state.get("passive_links_count", 0)
+            "passive_links_count": state.get("passive_links_count", 0),
+            "session_string": state.get("session_string", "")
         }
+        state_to_save[str(user_id)] = doc
+        
+        if db_collection is not None:
+            try:
+                await db_collection.update_one({"user_id": str(user_id)}, {"$set": doc}, upsert=True)
+            except Exception as e:
+                pass
+                
     try:
         with open(STATE_FILE, 'w') as f:
             json.dump(state_to_save, f)
     except Exception as e:
-        logger.error(f"Error saving state: {e}")
+        logger.error(f"Error saving local state: {e}")
+
+def save_state():
+    asyncio.create_task(_save_state_async())
 
 def get_user_data(user_id):
     if user_id not in user_data:
@@ -121,6 +188,8 @@ def get_user_data(user_id):
             "link_stats": {},
             "high_traffic_links": {},
             "link_schedule": {},
+            "link_last_action": {},
+            "link_seen_users": {},
             "active_links_count": 0,
             "passive_links_count": 0
         }
@@ -224,8 +293,8 @@ async def login_handler(event):
     data = get_user_data(user_id)
     
     # Check existing session
-    if data["client"] is None and os.path.exists(f'sessions/user_{user_id}.session'):
-        client = TelegramClient(f'sessions/user_{user_id}', API_ID, API_HASH, flood_sleep_threshold=0, connection_retries=3)
+    if data["client"] is None and data.get("session_string"):
+        client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, flood_sleep_threshold=0, connection_retries=3)
         await client.connect()
         if await client.is_user_authorized():
             data["client"] = client
@@ -266,7 +335,7 @@ async def message_handler(event):
             return
             
         data["phone"] = phone
-        client = TelegramClient(f'sessions/user_{user_id}', API_ID, API_HASH, flood_sleep_threshold=0, connection_retries=3)
+        client = TelegramClient(StringSession(""), API_ID, API_HASH, flood_sleep_threshold=0, connection_retries=3)
         
         try:
             await client.connect()
@@ -298,6 +367,7 @@ async def message_handler(event):
         client = data["client"]
         try:
             await client.sign_in(data["phone"], code, phone_code_hash=data["phone_code_hash"])
+            data["session_string"] = client.session.save()
             data["login_state"] = None
             save_state()
             await event.respond("✅ **Login Successful!** Send /start to open your control panel.")
@@ -319,6 +389,7 @@ async def message_handler(event):
         client = data["client"]
         try:
             await client.sign_in(password=password)
+            data["session_string"] = client.session.save()
             data["login_state"] = None
             save_state()
             await event.respond("✅ **Login Successful!** Send /start to open your control panel.")
@@ -557,27 +628,45 @@ async def runner_engine(user_id: int, chat_id: int):
                 participants_count = invite_info.participants_count
             elif hasattr(invite_info, 'chat') and hasattr(invite_info.chat, 'participants_count'):
                 participants_count = invite_info.chat.participants_count
-                
+            
+            recent_ids = []
+            new_unique_users = 0
+            if hasattr(invite_info, 'participants') and invite_info.participants:
+                seen_users = data.get("link_seen_users", {}).get(hash_str, [])
+                for p in invite_info.participants:
+                    recent_ids.append(p.id)
+                    if p.id not in seen_users:
+                        new_unique_users += 1
+            
             if participants_count is not None:
                 # High Traffic Logic
                 is_high_traffic = data.get("high_traffic_links", {}).get(hash_str, 0) > time.time() - 300 # Valid for 5 mins
                 
                 if last_count > 0:
+                    time_since_last_action = time.time() - data.get("link_last_action", {}).get(hash_str, 0)
                     diff = participants_count - last_count
+                    
                     if diff >= 10:
                         is_active_mode = True
                         data.setdefault("high_traffic_links", {})[hash_str] = time.time()
                         await bot_client.send_message(chat_id, f"🔥 **Active Mode (High Traffic):** {diff} new users joined `{link}`. Engaging!")
-                    elif diff >= 1:
+                    elif new_unique_users > 0 or (diff >= 1 and len(recent_ids) == 0):
                         if is_high_traffic:
                             is_active_mode = False
-                            await bot_client.send_message(chat_id, f"⏳ **Passive Mode (Throttling):** {diff} new users joined `{link}`, waiting for 10 users because group is High Traffic.")
+                            await bot_client.send_message(chat_id, f"⏳ **Passive Mode (Throttling):** New users detected in `{link}`, waiting for 10 users because group is High Traffic.")
                         else:
                             is_active_mode = True
-                            await bot_client.send_message(chat_id, f"🔥 **Active Mode (Low Traffic):** {diff} new users joined `{link}`. Engaging!")
+                            await bot_client.send_message(chat_id, f"🔥 **Active Mode:** Genuine new users detected in `{link}`. Engaging!")
+                    elif diff <= 0 and time_since_last_action > 360: # 6 minutes
+                        # Handle user churn (people leaving and joining keeping total count same)
+                        is_active_mode = True
+                        await bot_client.send_message(chat_id, f"🔄 **Active Mode (Refresh):** Total count unchanged, but 6+ minutes have passed. Checking for hidden new users in `{link}`!")
                     else:
                         is_active_mode = False
-                        await bot_client.send_message(chat_id, f"📉 **Passive Mode:** Only {diff} new users joined `{link}`. Skipping join.")
+                        if diff > 0:
+                            await bot_client.send_message(chat_id, f"📉 **Passive Mode (Spam Filter):** Ignored {diff} joins in `{link}` because they were all repeat spammers.")
+                        else:
+                            await bot_client.send_message(chat_id, f"📉 **Passive Mode:** No new users detected in `{link}`. Skipping join.")
                 else:
                     # First time checking
                     is_active_mode = True
@@ -586,6 +675,11 @@ async def runner_engine(user_id: int, chat_id: int):
                 # Update stats ONLY when we actually take action
                 if is_active_mode:
                     data["link_stats"][hash_str] = participants_count
+                    if len(recent_ids) > 0:
+                        seen = set(data.get("link_seen_users", {}).get(hash_str, []))
+                        seen.update(recent_ids)
+                        data.setdefault("link_seen_users", {})[hash_str] = list(seen)[-200:]
+                    data.setdefault("link_last_action", {})[hash_str] = time.time()
                     save_state()
         except Exception as e:
             # If we can't check it, default to active and let the join try block handle errors
@@ -714,10 +808,19 @@ async def main():
     await start_dummy_server()
     await bot_client.start(bot_token=BOT_TOKEN)
     
-    load_state()
+    await load_state()
     logger.info(f"Loaded state for {len(user_data)} users.")
     for uid, data in user_data.items():
         if data.get("loop_active"):
+            if data["client"] is None and data.get("session_string"):
+                try:
+                    client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, flood_sleep_threshold=0, connection_retries=3)
+                    await client.connect()
+                    if await client.is_user_authorized():
+                        data["client"] = client
+                except Exception as e:
+                    logger.error(f"Failed to resume session for {uid}: {e}")
+                    
             logger.info(f"Resuming background loop for user {uid}")
             data["task"] = asyncio.create_task(runner_engine(uid, uid))
     

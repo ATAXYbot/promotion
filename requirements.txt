@@ -1,2 +1,4 @@
 telethon==1.35.0
 aiohttp
+motor
+dnspython
