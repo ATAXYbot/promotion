@@ -22,8 +22,8 @@ from telethon.errors import (
     FloodWaitError, UserAlreadyParticipantError, SessionPasswordNeededError,
     PhoneNumberInvalidError, PhoneCodeInvalidError, PhoneCodeExpiredError
 )
-from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
-from telethon.tl.types import BotCommand, BotCommandScopeDefault, ChatInvite, ChatInviteAlready
+from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest, SendReactionRequest
+from telethon.tl.types import BotCommand, BotCommandScopeDefault, ChatInvite, ChatInviteAlready, ReactionEmoji
 from telethon.tl.functions.bots import SetBotCommandsRequest
 from aiohttp import web
 
@@ -143,7 +143,8 @@ async def load_state():
                         "hour_activity_log": state.get("hour_activity_log", {}),
                         "engine_uptime_start": state.get("engine_uptime_start", time.time()),
                         "user_proxies": state.get("user_proxies", []),
-                        "hibernating_links": state.get("hibernating_links", [])
+                        "hibernating_links": state.get("hibernating_links", []),
+                        "first_login_time": state.get("first_login_time", 0)
                     }
         except Exception as e:
             logger.error(f"Error loading state from local file: {e}")
@@ -185,7 +186,8 @@ async def _save_state_async():
             "hour_activity_log": state.get("hour_activity_log", {}),
             "engine_uptime_start": state.get("engine_uptime_start", time.time()),
             "user_proxies": state.get("user_proxies", []),
-            "hibernating_links": state.get("hibernating_links", [])
+            "hibernating_links": state.get("hibernating_links", []),
+            "first_login_time": state.get("first_login_time", 0)
         }
         state_to_save[str(user_id)] = doc
         
@@ -240,7 +242,8 @@ def get_user_data(user_id):
             "hour_activity_log": {},
             "engine_uptime_start": time.time(),
             "user_proxies": [],
-            "hibernating_links": []
+            "hibernating_links": [],
+            "first_login_time": 0
         }
     return user_data[user_id]
 
@@ -444,8 +447,9 @@ async def message_handler(event):
             await client.sign_in(data["phone"], code, phone_code_hash=data["phone_code_hash"])
             data["session_string"] = client.session.save()
             data["login_state"] = None
+            data["first_login_time"] = time.time()
             save_state()
-            await event.respond("✅ **Login Successful!** Send /start to open your control panel.")
+            await event.respond("✅ **Login Successful!** Session Warmup Protocol engaged for 72 hours. Send /start to open your control panel.")
         except SessionPasswordNeededError:
             data["login_state"] = "WAITING_PASSWORD"
             save_state()
@@ -466,8 +470,9 @@ async def message_handler(event):
             await client.sign_in(password=password)
             data["session_string"] = client.session.save()
             data["login_state"] = None
+            data["first_login_time"] = time.time()
             save_state()
-            await event.respond("✅ **Login Successful!** Send /start to open your control panel.")
+            await event.respond("✅ **Login Successful!** Session Warmup Protocol engaged for 72 hours. Send /start to open your control panel.")
             try:
                 await event.delete() # Delete password from chat history
             except:
@@ -1029,11 +1034,37 @@ async def runner_engine(user_id: int, chat_id: int):
             session_file = f'sessions/user_{user_id}.session'
             if os.path.exists(session_file):
                 proxies = data.get("user_proxies", [])
-                client_kwargs = {"flood_sleep_threshold": 0, "connection_retries": 3}
+                
+                # Hardware Spoofing (Persistent Device Fingerprinting)
+                if "spoofed_device" not in data:
+                    flagship_devices = [
+                        ("iPhone 15 Pro Max", "iOS 17.5.1", "10.14.1"),
+                        ("Samsung Galaxy S24 Ultra", "Android 14", "10.14.1"),
+                        ("Google Pixel 8 Pro", "Android 14", "10.14.1"),
+                        ("OnePlus 12", "Android 14", "10.14.1"),
+                        ("Xiaomi 14 Pro", "Android 14", "10.14.1")
+                    ]
+                    data["spoofed_device"] = random.choice(flagship_devices)
+                    save_state()
+                    
+                d_model, s_ver, a_ver = data["spoofed_device"]
+                
+                client_kwargs = {
+                    "flood_sleep_threshold": 0, 
+                    "connection_retries": 3,
+                    "device_model": d_model,
+                    "system_version": s_ver,
+                    "app_version": a_ver,
+                    "lang_code": "en",
+                    "system_lang_code": "en"
+                }
+                
                 if proxies:
                     p = random.choice(proxies)
                     client_kwargs["proxy"] = p
                     await send_alert(user_id, chat_id, f"🌐 **Proxy Connected:** Engine started on {p['proxy_type'].upper()} proxy ({p['addr']})")
+                    
+                await send_alert(user_id, chat_id, f"📱 **Hardware Spoofed:** Connected to Telegram servers disguised as `{d_model}` running `{s_ver}`")
                     
                 user_client = TelegramClient(f'sessions/user_{user_id}', API_ID, API_HASH, **client_kwargs)
                 await user_client.connect()
@@ -1309,6 +1340,18 @@ async def runner_engine(user_id: int, chat_id: int):
                     if history:
                         await user_client.send_read_acknowledge(joined_chat_id, history[0])
                         
+                        # Safe Ghost Reactions
+                        if random.random() < 0.05: # 5% chance
+                            # Find a message that is not a service action and actually has content
+                            normal_msgs = [m for m in history if not getattr(m, 'action', False) and getattr(m, 'text', '')]
+                            if normal_msgs:
+                                emoji = random.choice(['👍', '❤️', '🔥', '👏'])
+                                await user_client(SendReactionRequest(
+                                    peer=joined_chat_id,
+                                    msg_id=normal_msgs[0].id,
+                                    reaction=[ReactionEmoji(emoticon=emoji)]
+                                ))
+                        
                     # 50% chance to simulate typing
                     if random.random() > 0.5:
                         async with user_client.action(joined_chat_id, 'typing'):
@@ -1394,6 +1437,11 @@ async def runner_engine(user_id: int, chat_id: int):
                 grade_multiplier *= 0.6 # Speed up drastically
             elif ratio == 0: # Dead hour
                 grade_multiplier *= 1.3 # Slow down
+                
+        # Session Warmup Protocol (3-Day Training Wheels)
+        first_login = data.get("first_login_time", 0)
+        if first_login > 0 and time.time() - first_login < (3 * 86400):
+            grade_multiplier *= 3.0 # Force massive delays during 72-hour warmup
 
         if participants_count is None:
             next_delay = 3600 # 1 hour for errors
