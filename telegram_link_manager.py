@@ -657,10 +657,6 @@ async def runner_engine(user_id: int, chat_id: int):
                         else:
                             is_active_mode = True
                             await bot_client.send_message(chat_id, f"🔥 **Active Mode:** Genuine new users detected in `{link}`. Engaging!")
-                    elif diff <= 0 and time_since_last_action > 360: # 6 minutes
-                        # Handle user churn (people leaving and joining keeping total count same)
-                        is_active_mode = True
-                        await bot_client.send_message(chat_id, f"🔄 **Active Mode (Refresh):** Total count unchanged, but 6+ minutes have passed. Checking for hidden new users in `{link}`!")
                     else:
                         is_active_mode = False
                         if diff > 0:
@@ -757,17 +753,17 @@ async def runner_engine(user_id: int, chat_id: int):
             traffic_str = "❌ Error/Invalid"
         elif is_active_mode:
             if is_high_traffic or diff >= 10:
-                next_delay = random.randint(60, 180) # 1 to 3 mins
+                next_delay = random.randint(240, 360) # 4 to 6 mins
                 traffic_str = "🔥 High/Viral Traffic"
             else:
-                next_delay = random.randint(240, 360) # 4 to 6 mins
+                next_delay = random.randint(600, 900) # 10 to 15 mins
                 traffic_str = "🚶 Normal Traffic"
         else:
             if last_count > 0 and diff < 1:
-                next_delay = random.randint(420, 540) # 7 to 9 mins
+                next_delay = random.randint(960, 1140) # 16 to 19 mins
                 traffic_str = "💤 Dead Traffic"
             else:
-                next_delay = random.randint(60, 180) # 1 to 3 mins
+                next_delay = random.randint(240, 360) # 4 to 6 mins (Throttled)
                 traffic_str = "⏳ Throttled Traffic"
                 
         data.setdefault("link_schedule", {})[hash_str] = time.time() + next_delay
