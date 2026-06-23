@@ -1151,12 +1151,28 @@ async def runner_engine(user_id: int, chat_id: int):
         is_night_mode = 1 <= now_ist.hour < 5
 
         # Determine reschedule delay based on diff and active mode
+        
+        # Get link grade performance for intelligent scaling
+        perf = data.get("link_performance", {}).get(hash_str, {"checks": 0, "joins": 0})
+        grade = get_link_grade(perf["checks"], perf["joins"]).split(' ')[0] # 🔥, ⭐, 📈, 📊, 📉, 💀, 🆕
+        
+        # Smart Grade Multiplier (Better grade = faster checks when idle/night)
+        grade_multiplier = 1.0
+        if "🔥" in grade: grade_multiplier = 0.6
+        elif "⭐" in grade: grade_multiplier = 0.8
+        elif "📈" in grade: grade_multiplier = 1.0
+        elif "📊" in grade: grade_multiplier = 1.2
+        elif "📉" in grade or "💀" in grade: grade_multiplier = 1.5
+
         if participants_count is None:
             next_delay = 3600 # 1 hour for errors
             traffic_str = "❌ Error/Invalid"
         elif is_night_mode:
-            next_delay = random.randint(1500, 1800) # 25 to 30 mins
-            traffic_str = "🌙 Night Mode (Slow Peek)"
+            # Smart Night Mode: 25 to 40 mins base, scaled by grade
+            base_night = random.randint(1500, 2400) # 25 to 40 mins
+            next_delay = int(base_night * grade_multiplier)
+            next_delay = max(1500, min(next_delay, 3600)) # Cap between 25m and 60m
+            traffic_str = f"🌙 Night Mode ({grade} Smart Delay)"
         elif is_active_mode:
             if is_high_traffic or diff >= 10:
                 next_delay = random.randint(240, 360) # 4 to 6 mins
@@ -1166,8 +1182,10 @@ async def runner_engine(user_id: int, chat_id: int):
                 traffic_str = "🚶 Normal Traffic"
         else:
             if last_count > 0 and diff < 1:
-                next_delay = random.randint(960, 1140) # 16 to 19 mins
-                traffic_str = "💤 Dead Traffic"
+                # Dead Traffic scaling
+                base_dead = random.randint(900, 1200) # 15 to 20 mins
+                next_delay = int(base_dead * grade_multiplier)
+                traffic_str = f"💤 Dead Traffic ({grade} Smart Delay)"
             else:
                 next_delay = random.randint(240, 360) # 4 to 6 mins (Throttled)
                 traffic_str = "⏳ Throttled Traffic"
@@ -1176,10 +1194,17 @@ async def runner_engine(user_id: int, chat_id: int):
         save_state()
         
         if participants_count is not None:
-            await bot_client.send_message(chat_id, f"📅 **Rescheduled `{link}`:** ({traffic_str}) Next check in {next_delay // 60}m {next_delay % 60}s.")
+            await send_alert(user_id, chat_id, f"📅 **Rescheduled `{link}`:** ({traffic_str}) Next check in {next_delay // 60}m {next_delay % 60}s.")
 
         # Minimum global delay to prevent API Anti-Flood Warning from Peeking
-        anti_flood_delay = random.randint(25, 35)
+        queue_size = len(data["queue"])
+        if queue_size < 10:
+            anti_flood_delay = random.randint(45, 60) # Force slow loop for tiny queues
+        elif queue_size < 50:
+            anti_flood_delay = random.randint(30, 45)
+        else:
+            anti_flood_delay = random.randint(25, 35) # Fast loop for huge queues
+            
         if not await interruptible_sleep(anti_flood_delay, user_id):
             break
 
