@@ -134,6 +134,7 @@ async def load_state():
                         "editing_link": state.get("editing_link", None),
                         "link_performance": state.get("link_performance", {}),
                         "link_active_hours": state.get("link_active_hours", {}),
+                        "link_titles": state.get("link_titles", {}),
                         "notification_mode": state.get("notification_mode", "ALL")
                     }
         except Exception as e:
@@ -167,6 +168,7 @@ async def _save_state_async():
             "editing_link": state.get("editing_link", None),
             "link_performance": state.get("link_performance", {}),
             "link_active_hours": state.get("link_active_hours", {}),
+            "link_titles": state.get("link_titles", {}),
             "notification_mode": state.get("notification_mode", "ALL")
         }
         state_to_save[str(user_id)] = doc
@@ -213,6 +215,7 @@ def get_user_data(user_id):
             "editing_link": None,
             "link_performance": {},
             "link_active_hours": {},
+            "link_titles": {},
             "notification_mode": "ALL"
         }
     return user_data[user_id]
@@ -707,7 +710,8 @@ async def callback_handler(event):
                     status = f"🕒 {wait_sec // 60}m {wait_sec % 60}s"
                     
             short_link = l[:25] + "..." if len(l) > 25 else l
-            msg += f"`[{actual_idx + 1}]` {short_link}\n   └ Grade {grade} | {status}{sched_str}\n\n"
+            title = data.get("link_titles", {}).get(hash_str, "⏳ Fetching Name...")
+            msg += f"**{title}**\n`[{actual_idx + 1}]` {short_link}\n   └ Grade {grade} | {status}{sched_str}\n\n"
             row_buttons.append(Button.inline(f"[{actual_idx + 1}]", f"manage_link_{actual_idx}".encode('utf-8')))
             
         keyboard = []
@@ -744,8 +748,10 @@ async def callback_handler(event):
         grade = get_link_grade(perf["checks"], perf["joins"])
         
         active_hours = data.get("link_active_hours", {}).get(hash_str)
+        title = data.get("link_titles", {}).get(hash_str, "⏳ Fetching...")
         
         msg = f"**⚙️ Manage Link `[{idx + 1}]`**\n\n"
+        msg += f"**Group:** {title}\n"
         msg += f"**URL:** {l}\n"
         msg += f"**Grade:** {grade} `(Checks: {perf['checks']} | Joins: {perf['joins']})`\n"
         
@@ -1018,6 +1024,14 @@ async def runner_engine(user_id: int, chat_id: int):
                 participants_count = invite_info.participants_count
             elif hasattr(invite_info, 'chat') and hasattr(invite_info.chat, 'participants_count'):
                 participants_count = invite_info.chat.participants_count
+                
+            # Cache Title
+            if hasattr(invite_info, 'title'):
+                data.setdefault("link_titles", {})[hash_str] = invite_info.title
+            elif hasattr(invite_info, 'chat') and hasattr(invite_info.chat, 'title'):
+                data.setdefault("link_titles", {})[hash_str] = invite_info.chat.title
+            elif hash_str not in data.get("link_titles", {}):
+                data.setdefault("link_titles", {})[hash_str] = "Unknown Group"
             
             recent_ids = []
             new_unique_users = 0
