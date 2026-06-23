@@ -71,6 +71,8 @@ def load_state():
                         "next_join_time": state.get("next_join_time", 0),
                         "first_join_done": state.get("first_join_done", False),
                         "link_stats": state.get("link_stats", {}),
+                        "high_traffic_links": state.get("high_traffic_links", {}),
+                        "link_schedule": state.get("link_schedule", {}),
                         "active_links_count": state.get("active_links_count", 0),
                         "passive_links_count": state.get("passive_links_count", 0)
                     }
@@ -91,6 +93,8 @@ def save_state():
             "next_join_time": state.get("next_join_time", 0),
             "first_join_done": state.get("first_join_done", False),
             "link_stats": state.get("link_stats", {}),
+            "high_traffic_links": state.get("high_traffic_links", {}),
+            "link_schedule": state.get("link_schedule", {}),
             "active_links_count": state.get("active_links_count", 0),
             "passive_links_count": state.get("passive_links_count", 0)
         }
@@ -115,6 +119,8 @@ def get_user_data(user_id):
             "next_join_time": 0,
             "first_join_done": False,
             "link_stats": {},
+            "high_traffic_links": {},
+            "link_schedule": {},
             "active_links_count": 0,
             "passive_links_count": 0
         }
@@ -325,9 +331,7 @@ async def message_handler(event):
     elif state == "WAITING_ADD_LINK":
         link = event.text.strip()
         if 't.me' in link:
-            if len(data["queue"]) >= 10:
-                await event.respond("❌ **Queue Full:** You can only add a maximum of 10 links for high-speed safety.")
-            elif link in data["queue"]:
+            if link in data["queue"]:
                 await event.respond("⚠️ Link is already in the queue!")
             else:
                 data["queue"].append(link)
@@ -466,18 +470,10 @@ async def runner_engine(user_id: int, chat_id: int):
                 break
 
         now = time.time()
-        # Resume any interrupted long sleep from previous runs
-        if data.get("next_join_time", 0) > now + 2:
-            sleep_left = int(data["next_join_time"] - now)
-            if sleep_left > 10:
-                await bot_client.send_message(chat_id, f"💤 **Resuming Wait:** Sleeping for {sleep_left} more seconds before continuing.")
-            if not await interruptible_sleep(0, user_id):
-                break
-                
-        now = time.time()
+        
+        # Check daily limit
         data["daily_joins"] = [ts for ts in data["daily_joins"] if now - ts < 86400]
         
-        # Anti-ban limit check
         if len(data["daily_joins"]) >= 100:
             oldest = min(data["daily_joins"])
             wait_time = int((oldest + 86400) - now)
@@ -486,8 +482,37 @@ async def runner_engine(user_id: int, chat_id: int):
                 if not await interruptible_sleep(wait_time, user_id):
                     break
                 continue
+        
+        # Priority Scheduling Logic
+        earliest_link = None
+        earliest_time = float('inf')
+        
+        for link in data["queue"]:
+            hash_str = extract_hash(link)
+            # Default to 0 so new links get checked immediately
+            check_time = data.get("link_schedule", {}).get(hash_str, 0)
+            if check_time < earliest_time:
+                earliest_time = check_time
+                earliest_link = link
                 
-        link = data["queue"][data["current_index"]]
+        if earliest_link is None:
+            # Fallback (shouldn't happen if queue is not empty)
+            earliest_link = data["queue"][0]
+            earliest_time = 0
+            
+        # If the earliest link is still in the future, we sleep until it's ready
+        if earliest_time > time.time():
+            sleep_needed = int(earliest_time - time.time())
+            # We enforce a max chunk sleep of 30s so the loop can quickly react to Stop commands
+            chunk = min(sleep_needed, 30)
+            if sleep_needed > 30 and chunk == 30:
+                # Only spam the log if it's a long sleep
+                await bot_client.send_message(chat_id, f"💤 **Queue Sleeping:** No links ready. Sleeping for {sleep_needed // 60}m {sleep_needed % 60}s...")
+            if not await interruptible_sleep(chunk, user_id):
+                break
+            continue # Restart the loop to re-evaluate schedules
+                
+        link = earliest_link
         hash_str = extract_hash(link)
         
         # -----------------------------
@@ -505,22 +530,33 @@ async def runner_engine(user_id: int, chat_id: int):
                 participants_count = invite_info.chat.participants_count
                 
             if participants_count is not None:
-                last_count = data["link_stats"].get(hash_str, 0)
-                diff = participants_count - last_count
+                # High Traffic Logic
+                is_high_traffic = data.get("high_traffic_links", {}).get(hash_str, 0) > time.time() - 300 # Valid for 5 mins
                 
-                # If we've checked this before and the difference is less than 7, it's passive
-                if last_count > 0 and diff < 7:
-                    is_active_mode = False
-                    await bot_client.send_message(chat_id, f"📉 **Passive Mode:** Only {diff} new users joined `{link}`. Skipping join to save quota.")
-                else:
-                    if last_count > 0:
-                        await bot_client.send_message(chat_id, f"🔥 **Active Mode:** {diff} new users joined `{link}`. Engaging!")
+                if last_count > 0:
+                    if diff >= 10:
+                        is_active_mode = True
+                        data.setdefault("high_traffic_links", {})[hash_str] = time.time()
+                        await bot_client.send_message(chat_id, f"🔥 **Active Mode (High Traffic):** {diff} new users joined `{link}`. Engaging!")
+                    elif diff >= 1:
+                        if is_high_traffic:
+                            is_active_mode = False
+                            await bot_client.send_message(chat_id, f"⏳ **Passive Mode (Throttling):** {diff} new users joined `{link}`, waiting for 10 users because group is High Traffic.")
+                        else:
+                            is_active_mode = True
+                            await bot_client.send_message(chat_id, f"🔥 **Active Mode (Low Traffic):** {diff} new users joined `{link}`. Engaging!")
                     else:
-                        await bot_client.send_message(chat_id, f"🔥 **Active Mode:** First time checking `{link}` ({participants_count} members). Engaging!")
+                        is_active_mode = False
+                        await bot_client.send_message(chat_id, f"📉 **Passive Mode:** Only {diff} new users joined `{link}`. Skipping join.")
+                else:
+                    # First time checking
+                    is_active_mode = False
+                    await bot_client.send_message(chat_id, f"👀 **Initial Scan:** First time checking `{link}` ({participants_count} members). Setting baseline, no action taken yet.")
                 
-                # Update stats
-                data["link_stats"][hash_str] = participants_count
-                save_state()
+                # Update stats ONLY when we actually take action OR if it's the first scan
+                if is_active_mode or last_count == 0:
+                    data["link_stats"][hash_str] = participants_count
+                    save_state()
         except Exception as e:
             # If we can't check it, default to active and let the join try block handle errors
             pass
@@ -529,11 +565,11 @@ async def runner_engine(user_id: int, chat_id: int):
             data["active_links_count"] += 1
             # Step A: Pre-Action Delay (Prevent Telegram Anti-Spam)
             if not data.get("first_join_done"):
-                delay = random.randint(3, 8)
+                delay = random.randint(2, 5)
                 data["first_join_done"] = True
                 save_state()
             else:
-                delay = random.randint(15, 45)
+                delay = random.randint(5, 15)
                 
             await bot_client.send_message(chat_id, f"⏳ **Step A:** Sleeping for {delay} seconds before joining next link...")
             
@@ -555,7 +591,7 @@ async def runner_engine(user_id: int, chat_id: int):
                 await bot_client.send_message(chat_id, f"✅ **Success:** Joined chat ID `{joined_chat_id}`")
                 
                 # Step C: The Stay Simulation
-                stay_delay = random.randint(10, 25)
+                stay_delay = random.randint(5, 15)
                 await bot_client.send_message(chat_id, f"🧍 **Step C:** Simulating stay. Waiting {stay_delay} seconds in group...")
                 
                 if not await interruptible_sleep(stay_delay, user_id):
@@ -565,7 +601,11 @@ async def runner_engine(user_id: int, chat_id: int):
                 await user_client.delete_dialog(joined_chat_id)
                 
             except UserAlreadyParticipantError:
-                await bot_client.send_message(chat_id, f"ℹ️ Already a participant of `{link}`. Skipping.")
+                await bot_client.send_message(chat_id, f"ℹ️ Already a participant of `{link}`. Removing from queue.")
+                if link in data["queue"]:
+                    data["queue"].remove(link)
+                save_state()
+                continue
                 
             except FloodWaitError as e:
                 sleep_time = e.seconds + 30
@@ -579,43 +619,46 @@ async def runner_engine(user_id: int, chat_id: int):
                 
             except Exception as e:
                 await bot_client.send_message(chat_id, f"❌ **Error processing link {link}:**\n`{str(e)}`")
+                # Reschedule the bad link for a long time to prevent tight loop errors
+                data.setdefault("link_schedule", {})[hash_str] = time.time() + 3600 # 1 hour
+                save_state()
                 await interruptible_sleep(10, user_id)
+                continue
         else:
             data["passive_links_count"] += 1
-            # Passive mode sleep is very short
-            await interruptible_sleep(random.randint(5, 15), user_id)
 
-        # Move to next link
-        data["current_index"] += 1
+        # Determine reschedule delay based on diff and active mode
+        if participants_count is None:
+            next_delay = 3600 # 1 hour for errors
+            traffic_str = "❌ Error/Invalid"
+        elif is_active_mode:
+            if is_high_traffic or diff >= 10:
+                next_delay = random.randint(60, 180) # 1 to 3 mins
+                traffic_str = "🔥 High/Viral Traffic"
+            else:
+                next_delay = random.randint(240, 360) # 4 to 6 mins
+                traffic_str = "🚶 Normal Traffic"
+        else:
+            if last_count == 0:
+                next_delay = random.randint(60, 180) # 1 to 3 mins
+                traffic_str = "👀 Initial Scan"
+            elif last_count > 0 and diff < 1:
+                next_delay = random.randint(420, 540) # 7 to 9 mins
+                traffic_str = "💤 Dead Traffic"
+            else:
+                next_delay = random.randint(60, 180) # 1 to 3 mins
+                traffic_str = "⏳ Throttled Traffic"
+                
+        data.setdefault("link_schedule", {})[hash_str] = time.time() + next_delay
         save_state()
         
-        # LOOP COOLDOWN
-        if data["current_index"] >= len(data["queue"]):
-            data["current_index"] = 0
-            
-            # Calculate dynamic cooldown based on traffic
-            total_checked = data["active_links_count"] + data["passive_links_count"]
-            if total_checked == 0:
-                total_checked = 1
-                
-            active_ratio = data["active_links_count"] / total_checked
-            
-            if active_ratio >= 0.5:
-                # High traffic globally, short sleep
-                cooldown = random.randint(120, 420) # 2 to 7 minutes
-                mode_str = "🔥 High Traffic Global"
-            else:
-                # Low traffic globally, long sleep
-                cooldown = random.randint(900, 1800) # 15 to 30 minutes
-                mode_str = "💤 Low Traffic Global"
-                
-            data["active_links_count"] = 0
-            data["passive_links_count"] = 0
-            save_state()
-            
-            await bot_client.send_message(chat_id, f"🛡️ **Loop Cooldown Activated ({mode_str}):** Finished all {len(data['queue'])} links. Sleeping for {cooldown // 60} minutes and {cooldown % 60} seconds before restarting loop...")
-            if not await interruptible_sleep(cooldown, user_id):
-                break
+        if participants_count is not None:
+            await bot_client.send_message(chat_id, f"📅 **Rescheduled `{link}`:** ({traffic_str}) Next check in {next_delay // 60}m {next_delay % 60}s.")
+
+        # Minimum global delay to prevent API Anti-Flood Warning from Peeking
+        anti_flood_delay = random.randint(3, 5)
+        if not await interruptible_sleep(anti_flood_delay, user_id):
+            break
 
 # ==========================================
 # MAIN EXECUTION & DUMMY SERVER
