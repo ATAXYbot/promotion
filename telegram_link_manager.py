@@ -300,11 +300,14 @@ async def interruptible_sleep(seconds: int, user_id: int) -> bool:
 async def show_menu(chat_id: int, user_id: int, event=None):
     data = get_user_data(user_id)
     
-    # Lazy load existing session from disk if bot was restarted
+    # Lazy load existing session from disk/DB if bot was restarted
     if data["client"] is None:
-        session_file = f'sessions/user_{user_id}.session'
-        if os.path.exists(session_file):
-            client = TelegramClient(f'sessions/user_{user_id}', API_ID, API_HASH, flood_sleep_threshold=0, connection_retries=3)
+        has_string = bool(data.get("session_string"))
+        
+        if has_string:
+            kwargs = get_client_kwargs(data)
+            save_state()
+            client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, **kwargs)
             await client.connect()
             if await client.is_user_authorized():
                 data["client"] = client
@@ -683,7 +686,17 @@ async def message_handler(event):
 async def callback_handler(event):
     user_id = event.sender_id
     data = get_user_data(user_id)
-    
+    # Lazy load existing session from disk/DB if bot was restarted
+    if data["client"] is None:
+        has_string = bool(data.get("session_string"))
+        
+        if has_string:
+            kwargs = get_client_kwargs(data)
+            client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, **kwargs)
+            await client.connect()
+            if await client.is_user_authorized():
+                data["client"] = client
+                
     if data["client"] is None or not await data["client"].is_user_authorized():
         await event.answer("You are not logged in! Send /login", alert=True)
         return
