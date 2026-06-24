@@ -95,7 +95,24 @@ async def load_state():
                     "link_seen_users": doc.get("link_seen_users", {}),
                     "active_links_count": doc.get("active_links_count", 0),
                     "passive_links_count": doc.get("passive_links_count", 0),
-                    "session_string": doc.get("session_string", "")
+                    "session_string": doc.get("session_string", ""),
+                    "paused_links": doc.get("paused_links", []),
+                    "stopped_links": doc.get("stopped_links", []),
+                    "queue_page": doc.get("queue_page", 0),
+                    "editing_link": doc.get("editing_link", None),
+                    "link_performance": doc.get("link_performance", {}),
+                    "link_active_hours": doc.get("link_active_hours", {}),
+                    "link_titles": doc.get("link_titles", {}),
+                    "notification_mode": doc.get("notification_mode", "ALL"),
+                    "global_seen_users": doc.get("global_seen_users", {}),
+                    "global_blacklist": doc.get("global_blacklist", []),
+                    "flood_history": doc.get("flood_history", []),
+                    "panic_mode_until": doc.get("panic_mode_until", 0),
+                    "hour_activity_log": doc.get("hour_activity_log", {}),
+                    "engine_uptime_start": doc.get("engine_uptime_start", time.time()),
+                    "user_proxies": doc.get("user_proxies", []),
+                    "hibernating_links": doc.get("hibernating_links", []),
+                    "first_login_time": doc.get("first_login_time", 0)
                 }
             loaded_from_db = True
             logger.info("State successfully loaded from MongoDB.")
@@ -960,12 +977,10 @@ async def callback_handler(event):
                     wait_sec = int(check_time - now)
                     status = f"🕒 IN {wait_sec // 60:02d}:{wait_sec % 60:02d}"
                     
-            short_link = l[:35] + "..." if len(l) > 35 else l
-            clean_link = short_link.replace("https://", "").replace("t.me/", "")
             title = data.get("link_titles", {}).get(hash_str, "⏳ Fetching Group Info...")
             
             msg += f"**[{actual_idx + 1}] {title}**\n"
-            msg += f"└ 🔗 `{clean_link}`\n"
+            msg += f"└ 🔗 {l}\n"
             msg += f"└ {grade} | {status}{sched_str}\n\n"
             
             row_buttons.append(Button.inline(f"[{actual_idx + 1}]", f"manage_link_{actual_idx}".encode('utf-8')))
@@ -1012,10 +1027,7 @@ async def callback_handler(event):
         msg = f"🎛️ **GROUP PROFILE `[{idx + 1}]`**\n"
         msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
         msg += f"**Name:** {title}\n"
-        
-        short_link = l[:40] + "..." if len(l) > 40 else l
-        clean_link = short_link.replace("https://", "").replace("t.me/", "")
-        msg += f"**Link:** `{clean_link}`\n"
+        msg += f"**Link:** {l}\n"
         msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
         msg += f"📊 **ANALYTICS**\n"
         msg += f"**Health Grade:** {grade}\n"
@@ -1600,27 +1612,35 @@ async def runner_engine(user_id: int, chat_id: int):
                 data["hibernating_links"].append(hash_str)
                 await send_alert(user_id, chat_id, f"🥶 **HIBERNATING `{link}`:** Group is dead (Grade F). Auto-Pausing to save engine power. Will send a Sonar Ping tomorrow.")
         elif is_night_mode:
-            # Smart Night Mode: 25 to 40 mins base, scaled by grade
-            base_night = random.randint(1500, 2400) # 25 to 40 mins
+            # Smart Night Mode: Deep sleep, scaled by grade
+            base_night = random.randint(3600, 7200) # 1 to 2 hours
             next_delay = int(base_night * grade_multiplier)
-            next_delay = max(1500, min(next_delay, 3600)) # Cap between 25m and 60m
             traffic_str = f"🌙 Night Mode ({grade} Smart Delay)"
-        elif is_active_mode:
-            if is_high_traffic or diff >= 10:
-                next_delay = random.randint(240, 360) # 4 to 6 mins
-                traffic_str = "🔥 High/Viral Traffic"
-            else:
-                next_delay = random.randint(600, 900) # 10 to 15 mins
-                traffic_str = "🚶 Normal Traffic"
         else:
-            if last_count > 0 and diff < 1:
-                # Dead Traffic scaling
-                base_dead = random.randint(900, 1200) # 15 to 20 mins
-                next_delay = int(base_dead * grade_multiplier)
-                traffic_str = f"💤 Dead Traffic ({grade} Smart Delay)"
-            else:
-                next_delay = random.randint(240, 360) # 4 to 6 mins (Throttled)
-                traffic_str = "⏳ Throttled Traffic"
+            # NEXT-LEVEL AI THROTTLING (Grade-Based Focus)
+            if "🔥" in grade: # A+ Viral
+                next_delay = random.randint(120, 300) # 2-5 mins
+                traffic_str = f"🔥 Viral Focus"
+            elif "⭐" in grade: # A Excellent
+                next_delay = random.randint(300, 600) # 5-10 mins
+                traffic_str = f"⭐ Prime Focus"
+            elif "📈" in grade: # B Active
+                next_delay = random.randint(600, 900) # 10-15 mins
+                traffic_str = f"📈 Active Focus"
+            elif "📊" in grade: # C Slow
+                next_delay = random.randint(1800, 2700) # 30-45 mins
+                traffic_str = f"📊 Slow (Saving API Limits)"
+            elif "📉" in grade: # D Dead/Spam
+                next_delay = random.randint(7200, 14400) # 2-4 hours! Anti-Ban Protection
+                traffic_str = f"📉 Dead Group (Anti-Ban Throttling)"
+            else: # 🆕 Init
+                next_delay = random.randint(300, 600) # 5-10 mins (Learn quickly)
+                traffic_str = f"🆕 Scanning Mode"
+                
+            # Override for absolute Viral spikes (diff >= 10)
+            if is_active_mode and (is_high_traffic or diff >= 10):
+                next_delay = random.randint(60, 180) # 1-3 mins MAX Speed
+                traffic_str = "🚀 VIRAL SPIKE DETECTED (Max Speed)"
                 
         # Ensure session string is always synced with any internal Telethon updates
         user_client = data.get("client")
