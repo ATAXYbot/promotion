@@ -430,7 +430,7 @@ def get_client_kwargs(data):
     proxies = data.get("user_proxies", [])
     
     # Hardware Spoofing (Persistent Device Fingerprinting)
-    if "spoofed_device" not in data:
+    if not data.get("spoofed_device"):
         flagship_devices = [
             ("iPhone 15 Pro Max", "iOS 17.5.1", "10.14.1"),
             ("Samsung Galaxy S24 Ultra", "Android 14", "10.14.1"),
@@ -439,6 +439,7 @@ def get_client_kwargs(data):
             ("Xiaomi 14 Pro", "Android 14", "10.14.1")
         ]
         data["spoofed_device"] = random.choice(flagship_devices)
+        save_state()
         
     d_model, s_ver, a_ver = data["spoofed_device"]
     
