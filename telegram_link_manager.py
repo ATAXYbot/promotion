@@ -83,9 +83,9 @@ async def load_state():
                     "current_index": doc.get("current_index", 0),
                     "loop_active": doc.get("loop_active", False),
                     "daily_joins": doc.get("daily_joins", []),
-                    "login_state": doc.get("login_state", None),
+                    "login_state": None,
                     "phone": doc.get("phone", None),
-                    "phone_code_hash": doc.get("phone_code_hash", None),
+                    "phone_code_hash": None,
                     "next_join_time": doc.get("next_join_time", 0),
                     "first_join_done": doc.get("first_join_done", False),
                     "link_stats": doc.get("link_stats", {}),
@@ -112,7 +112,8 @@ async def load_state():
                     "engine_uptime_start": doc.get("engine_uptime_start", time.time()),
                     "user_proxies": doc.get("user_proxies", []),
                     "hibernating_links": doc.get("hibernating_links", []),
-                    "first_login_time": doc.get("first_login_time", 0)
+                    "first_login_time": doc.get("first_login_time", 0),
+                    "spoofed_device": doc.get("spoofed_device", None)
                 }
             loaded_from_db = True
             logger.info("State successfully loaded from MongoDB.")
@@ -175,9 +176,7 @@ async def _save_state_async():
             "current_index": state["current_index"],
             "loop_active": state["loop_active"],
             "daily_joins": state["daily_joins"],
-            "login_state": state["login_state"],
-            "phone": state["phone"],
-            "phone_code_hash": state["phone_code_hash"],
+            "phone": state.get("phone", None),
             "next_join_time": state.get("next_join_time", 0),
             "first_join_done": state.get("first_join_done", False),
             "link_stats": state.get("link_stats", {}),
@@ -204,7 +203,8 @@ async def _save_state_async():
             "engine_uptime_start": state.get("engine_uptime_start", time.time()),
             "user_proxies": state.get("user_proxies", []),
             "hibernating_links": state.get("hibernating_links", []),
-            "first_login_time": state.get("first_login_time", 0)
+            "first_login_time": state.get("first_login_time", 0),
+            "spoofed_device": state.get("spoofed_device", None)
         }
         state_to_save[str(user_id)] = doc
         
@@ -260,7 +260,8 @@ def get_user_data(user_id):
             "engine_uptime_start": time.time(),
             "user_proxies": [],
             "hibernating_links": [],
-            "first_login_time": 0
+            "first_login_time": 0,
+            "spoofed_device": None
         }
     return user_data[user_id]
 
