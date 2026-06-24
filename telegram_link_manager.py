@@ -324,21 +324,40 @@ async def show_menu(chat_id: int, user_id: int, event=None):
         return
 
     keyboard = [
-        [Button.inline("➕ Add Link", b"add_link"), Button.inline("❌ Remove Link", b"remove_link")],
-        [Button.inline("▶️ Start Engine", b"start_loop"), Button.inline("⏸️ Stop", b"stop_loop")],
-        [Button.inline("📊 Live Queue Stats", b"show_queue"), Button.inline("⚙️ Settings", b"settings_menu")],
-        [Button.inline("🚪 Logout", b"logout")]
+        [Button.inline("▶️ START ENGINE", b"start_loop"), Button.inline("⏸️ STOP", b"stop_loop")],
+        [Button.inline("➕ Add Link", b"add_link"), Button.inline("📊 Live Queue", b"show_queue")],
+        [Button.inline("⚙️ Settings & Proxy", b"settings_menu")],
+        [Button.inline("🚪 Secure Logout", b"logout")]
     ]
-    status = "🟢 ACTIVE" if data["loop_active"] else "🔴 PAUSED"
+    status = "🟢 ACTIVE (Running)" if data["loop_active"] else "🔴 PAUSED (Stopped)"
     
     now = time.time()
     data["daily_joins"] = [ts for ts in data["daily_joins"] if now - ts < 86400]
     
+    # Calculate Session Security / Warmup Status
+    warmup_status = "🟢 Secured (Full Speed)"
+    if "first_login_time" in data and data["first_login_time"] > 0:
+        time_elapsed = now - data["first_login_time"]
+        if time_elapsed < (72 * 3600):
+            progress = int((time_elapsed / (72 * 3600)) * 100)
+            warmup_status = f"🟡 Warmup Mode ({progress}%)"
+            
+    uptime_str = "0h 0m"
+    if data["loop_active"]:
+        up_sec = int(now - data.get("engine_uptime_start", now))
+        uptime_str = f"{up_sec // 3600}h {(up_sec % 3600) // 60}m"
+        
     text = (
-        f"**🚀 Personal Link Manager Dashboard**\n\n"
-        f"**Engine:** {status}\n"
-        f"**Queue:** {len(data['queue'])} Links\n"
-        f"**Joins (24h):** {len(data['daily_joins'])}"
+        f"🖥️ **MAIN CONTROL PANEL**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"**Engine State:** {status}\n"
+        f"**Uptime:** {uptime_str}\n"
+        f"**Session Trust:** {warmup_status}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 **PERFORMANCE (24H)**\n"
+        f"**Links in Queue:** `{len(data['queue'])}`\n"
+        f"**Successful Joins:** `{len(data['daily_joins'])}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━"
     )
     if event and hasattr(event, 'edit'):
         await event.edit(text, buttons=keyboard)
@@ -750,7 +769,10 @@ async def callback_handler(event):
         
     elif cb_data == "settings_menu":
         mode = data.get("notification_mode", "ALL")
-        msg = "**⚙️ Settings & Notifications**\n\nChoose how often the bot messages you:"
+        msg = "⚙️ **SYSTEM CONFIGURATION**\n"
+        msg += "━━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += "**Notification Level:**\n"
+        msg += "Choose how aggressively the bot alerts you about queue events.\n"
         
         btn_all = "✅ Everything" if mode == "ALL" else "Everything"
         btn_viral = "✅ Viral Only" if mode == "VIRAL_ONLY" else "Viral Only"
@@ -778,13 +800,15 @@ async def callback_handler(event):
         
     elif cb_data == "proxies_menu":
         proxies = data.get("user_proxies", [])
-        msg = f"**🌐 Proxy Manager (IP Rotation)**\n\nCurrent Proxies: {len(proxies)}\n\n"
+        msg = f"🌐 **PROXY MANAGER (IP ROTATION)**\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"**Active Nodes:** `{len(proxies)}`\n\n"
         if proxies:
             for i, p in enumerate(proxies):
-                msg += f"`[{i}]` {p['proxy_type'].upper()} - {p['addr']}:{p['port']}\n"
+                msg += f"🟢 `[{i + 1}]` **{p['proxy_type'].upper()}** ➔ `{p['addr']}:{p['port']}`\n"
         else:
-            msg += "*No proxies added. Using Render Datacenter IP.*\n"
-            
+            msg += "⚠️ *No proxies added. Using Default Server IP.*\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
         keyboard = [
             [Button.inline("➕ Add Proxy", b"add_proxy"), Button.inline("❌ Clear All", b"clear_proxies")],
             [Button.inline("🔙 Back to Settings", b"settings_menu")]
@@ -826,7 +850,9 @@ async def callback_handler(event):
         end_idx = start_idx + 5
         page_queue = data["queue"][start_idx:end_idx]
         
-        msg = f"**📊 Live Queue Stats (Page {page+1}/{max_page+1}):**\n\n"
+        msg = f"📊 **LIVE QUEUE MONITOR**\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"**Page:** {page+1} of {max_page+1} | **Total Links:** {len(data['queue'])}\n\n"
         now = time.time()
         
         row_buttons = []
@@ -846,24 +872,29 @@ async def callback_handler(event):
                 sched_str = f" [🕒 {start_hr:02d}:00-{end_hr:02d}:00]"
                 
             if hash_str in data.get("stopped_links", []):
-                status = "⏹️ Stopped"
+                status = "🔴 STOPPED"
             elif hash_str in data.get("paused_links", []):
-                status = "⏸️ Paused"
+                status = "🟡 PAUSED"
             elif hash_str in data.get("hibernating_links", []):
-                status = "💤 Hibernating (Auto-Paused)"
+                status = "💤 SLEEPING (Dead Group)"
             else:
                 check_time = data.get("link_schedule", {}).get(hash_str, 0)
                 if check_time == 0:
-                    status = "⏳ Wait"
+                    status = "⏳ WAITING"
                 elif check_time <= now:
-                    status = "🔥 Ready"
+                    status = "🔥 ACTIVE NOW"
                 else:
                     wait_sec = int(check_time - now)
-                    status = f"🕒 {wait_sec // 60}m {wait_sec % 60}s"
+                    status = f"🕒 IN {wait_sec // 60}M {wait_sec % 60}S"
                     
-            short_link = l[:25] + "..." if len(l) > 25 else l
-            title = data.get("link_titles", {}).get(hash_str, "⏳ Fetching Name...")
-            msg += f"**{title}**\n`[{actual_idx + 1}]` {short_link}\n   └ Grade {grade} | {status}{sched_str}\n\n"
+            short_link = l[:35] + "..." if len(l) > 35 else l
+            clean_link = short_link.replace("https://", "").replace("t.me/", "")
+            title = data.get("link_titles", {}).get(hash_str, "⏳ Fetching Group Info...")
+            
+            msg += f"**[{actual_idx + 1}] {title}**\n"
+            msg += f"└ 🔗 `{clean_link}`\n"
+            msg += f"└ {grade} | {status}{sched_str}\n\n"
+            
             row_buttons.append(Button.inline(f"[{actual_idx + 1}]", f"manage_link_{actual_idx}".encode('utf-8')))
             
         keyboard = []
@@ -874,9 +905,9 @@ async def callback_handler(event):
                 
         nav_buttons = []
         if page > 0:
-            nav_buttons.append(Button.inline("⬅️ Prev", b"show_queue_prev"))
+            nav_buttons.append(Button.inline(f"⬅️ Page {page}", b"show_queue_prev"))
         if page < max_page:
-            nav_buttons.append(Button.inline("Next ➡️", b"show_queue_next"))
+            nav_buttons.append(Button.inline(f"Page {page+2} ➡️", b"show_queue_next"))
         if nav_buttons:
             keyboard.append(nav_buttons)
             
@@ -904,40 +935,48 @@ async def callback_handler(event):
         active_hours = data.get("link_active_hours", {}).get(hash_str)
         title = data.get("link_titles", {}).get(hash_str, "⏳ Fetching...")
         
-        msg = f"**⚙️ Manage Link `[{idx + 1}]`**\n\n"
-        msg += f"**Group:** {title}\n"
-        msg += f"**URL:** {l}\n"
-        msg += f"**Grade:** {grade} `(Checks: {perf['checks']} | Joins: {perf['joins']})`\n"
+        msg = f"🎛️ **GROUP PROFILE `[{idx + 1}]`**\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"**Name:** {title}\n"
+        
+        short_link = l[:40] + "..." if len(l) > 40 else l
+        clean_link = short_link.replace("https://", "").replace("t.me/", "")
+        msg += f"**Link:** `{clean_link}`\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"📊 **ANALYTICS**\n"
+        msg += f"**Health Grade:** {grade}\n"
+        msg += f"**Checks:** `{perf['checks']}` | **Joins:** `{perf['joins']}`\n"
         
         if active_hours:
-            msg += f"**Schedule (IST):** {active_hours['start']:02d}:00 to {active_hours['end']:02d}:00\n"
+            msg += f"**Schedule (IST):** 🕒 {active_hours['start']:02d}:00 - {active_hours['end']:02d}:00\n"
             
         if is_stopped:
-            msg += "**Status:** ⏹️ Stopped\n"
+            msg += "**Status:** 🔴 STOPPED (Ignored by engine)\n"
         elif is_paused:
-            msg += "**Status:** ⏸️ Paused\n"
+            msg += "**Status:** 🟡 PAUSED (Skipping queue)\n"
         elif is_hibernating:
-            msg += "**Status:** 💤 Hibernating (Waiting for Sonar Ping)\n"
+            msg += "**Status:** 💤 SLEEPING (Dead group, waiting for sonar)\n"
         else:
             now = time.time()
             check_time = data.get("link_schedule", {}).get(hash_str, 0)
             if check_time == 0:
-                msg += "**Status:** ⏳ Waiting for scan\n"
+                msg += "**Status:** ⏳ WAITING for initial scan\n"
             elif check_time <= now:
-                msg += "**Status:** 🔥 Ready to check\n"
+                msg += "**Status:** 🔥 ACTIVE NOW\n"
             else:
                 wait_sec = int(check_time - now)
-                msg += f"**Status:** 🕒 Next check in {wait_sec // 60}m {wait_sec % 60}s\n"
+                msg += f"**Status:** 🕒 IN {wait_sec // 60}M {wait_sec % 60}S\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 
-        pause_btn = Button.inline("▶️ Resume", f"resume_link_{idx}".encode('utf-8')) if is_paused else Button.inline("⏸️ Pause", f"pause_link_{idx}".encode('utf-8'))
-        stop_btn = Button.inline("▶️ Start", f"start_link_{idx}".encode('utf-8')) if is_stopped else Button.inline("⏹️ Stop", f"stop_link_{idx}".encode('utf-8'))
+        pause_btn = Button.inline("🔴 PAUSED (Resume)", f"resume_link_{idx}".encode('utf-8')) if is_paused else Button.inline("🟢 ACTIVE (Pause)", f"pause_link_{idx}".encode('utf-8'))
+        stop_btn = Button.inline("🔴 STOPPED (Start)", f"start_link_{idx}".encode('utf-8')) if is_stopped else Button.inline("⏹️ Stop Link", f"stop_link_{idx}".encode('utf-8'))
         
         sched_row = [Button.inline("🕒 Edit Schedule", f"set_sched_{idx}".encode('utf-8')), Button.inline("❌ Clear Schedule", f"clr_sched_{idx}".encode('utf-8'))] if active_hours else [Button.inline("🕒 Set Schedule", f"set_sched_{idx}".encode('utf-8'))]
         
         keyboard = [
             [pause_btn, stop_btn],
             sched_row,
-            [Button.inline("✏️ Change", f"edit_link_{idx}".encode('utf-8')), Button.inline("🗑️ Delete", f"del_link_{idx}".encode('utf-8'))],
+            [Button.inline("✏️ Edit URL", f"edit_link_{idx}".encode('utf-8')), Button.inline("🗑️ Delete Link", f"del_link_{idx}".encode('utf-8'))],
             [Button.inline("🔙 Back to Queue", b"show_queue_refresh")]
         ]
         await event.edit(msg, buttons=keyboard, link_preview=False)
