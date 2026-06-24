@@ -1684,7 +1684,8 @@ async def main():
         if data.get("loop_active"):
             if data["client"] is None and data.get("session_string"):
                 try:
-                    client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, flood_sleep_threshold=0, connection_retries=3)
+                    kwargs = get_client_kwargs(data)
+                    client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, **kwargs)
                     await client.connect()
                     if await client.is_user_authorized():
                         data["client"] = client
