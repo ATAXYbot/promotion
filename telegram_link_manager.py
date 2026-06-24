@@ -251,7 +251,7 @@ def get_user_data(user_id):
             "link_performance": {},
             "link_active_hours": {},
             "link_titles": {},
-            "notification_mode": "ALL",
+            "notification_mode": "SILENT",
             "global_seen_users": {},
             "global_blacklist": [],
             "flood_history": [],
@@ -308,11 +308,13 @@ async def send_alert(user_id: int, chat_id: int, msg: str, priority="NORMAL"):
     add_live_log(user_id, msg)
     
     data = get_user_data(user_id)
-    mode = data.get("notification_mode", "ALL")
+    mode = data.get("notification_mode", "SILENT")
     
     if mode == "SILENT":
         return
     if mode == "VIRAL_ONLY" and priority != "HIGH":
+        return
+    if mode == "ALL" and priority == "LOW": # Prevent spam even on ALL setting
         return
         
     await bot_client.send_message(chat_id, msg)
@@ -1418,13 +1420,13 @@ async def runner_engine(user_id: int, chat_id: int):
                     else:
                         is_active_mode = False
                         if diff > 0:
-                            await bot_client.send_message(chat_id, f"📉 **Passive Mode (Spam Filter):** Ignored {diff} joins in `{link}` because they were all repeat spammers.")
+                            await send_alert(user_id, chat_id, f"📉 **Passive Mode (Spam Filter):** Ignored {diff} joins in `{link}` because they were all repeat spammers.", priority="LOW")
                         else:
-                            await bot_client.send_message(chat_id, f"📉 **Passive Mode:** No new users detected in `{link}`. Skipping join.")
+                            await send_alert(user_id, chat_id, f"📉 **Passive Mode:** No new users detected in `{link}`. Skipping join.", priority="LOW")
                 else:
                     # First time checking
                     is_active_mode = True
-                    await bot_client.send_message(chat_id, f"🔥 **Active Mode:** First time checking `{link}` ({participants_count} members). Engaging!")
+                    await send_alert(user_id, chat_id, f"🔥 **Active Mode:** First time checking `{link}` ({participants_count} members). Engaging!", priority="NORMAL")
                 
                 # Update stats ONLY when we actually take action
                 if is_active_mode:
@@ -1492,25 +1494,9 @@ async def runner_engine(user_id: int, chat_id: int):
                 if not await interruptible_sleep(half_delay, user_id):
                     break
                     
-                # GHOST READING EMULATION
+                # BANDWIDTH OPTIMIZED: GHOST TYPING EMULATION ONLY
                 try:
-                    history = await user_client.get_messages(joined_chat_id, limit=15)
-                    if history:
-                        await user_client.send_read_acknowledge(joined_chat_id, history[0])
-                        
-                        # Safe Ghost Reactions
-                        if random.random() < 0.05: # 5% chance
-                            # Find a message that is not a service action and actually has content
-                            normal_msgs = [m for m in history if not getattr(m, 'action', False) and getattr(m, 'text', '')]
-                            if normal_msgs:
-                                emoji = random.choice(['👍', '❤️', '🔥', '👏'])
-                                await user_client(SendReactionRequest(
-                                    peer=joined_chat_id,
-                                    msg_id=normal_msgs[0].id,
-                                    reaction=[ReactionEmoji(emoticon=emoji)]
-                                ))
-                        
-                    # 50% chance to simulate typing
+                    # 50% chance to simulate typing (uses almost zero data)
                     if random.random() > 0.5:
                         async with user_client.action(joined_chat_id, 'typing'):
                             await interruptible_sleep(random.randint(2, 4), user_id)
@@ -1525,7 +1511,7 @@ async def runner_engine(user_id: int, chat_id: int):
                 await user_client.delete_dialog(joined_chat_id)
                 
             except UserAlreadyParticipantError:
-                await bot_client.send_message(chat_id, f"ℹ️ Already a participant of `{link}`. Removing from queue.")
+                await send_alert(user_id, chat_id, f"ℹ️ Already a participant of `{link}`. Removing from queue.", priority="LOW")
                 if link in data["queue"]:
                     data["queue"].remove(link)
                 save_state()
@@ -1651,7 +1637,7 @@ async def runner_engine(user_id: int, chat_id: int):
         save_state()
         
         if participants_count is not None:
-            await send_alert(user_id, chat_id, f"📅 **Rescheduled `{link}`:** ({traffic_str}) Next check in {next_delay // 60}m {next_delay % 60}s.")
+            await send_alert(user_id, chat_id, f"📅 **Rescheduled `{link}`:** ({traffic_str}) Next check in {next_delay // 60}m {next_delay % 60}s.", priority="LOW")
 
         # Minimum global delay to prevent API Anti-Flood Warning from Peeking
         queue_size = len(data["queue"])
