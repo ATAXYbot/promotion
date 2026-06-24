@@ -365,6 +365,37 @@ async def help_handler(event):
     )
     await event.respond(help_text)
 
+def get_client_kwargs(data):
+    proxies = data.get("user_proxies", [])
+    
+    # Hardware Spoofing (Persistent Device Fingerprinting)
+    if "spoofed_device" not in data:
+        flagship_devices = [
+            ("iPhone 15 Pro Max", "iOS 17.5.1", "10.14.1"),
+            ("Samsung Galaxy S24 Ultra", "Android 14", "10.14.1"),
+            ("Google Pixel 8 Pro", "Android 14", "10.14.1"),
+            ("OnePlus 12", "Android 14", "10.14.1"),
+            ("Xiaomi 14 Pro", "Android 14", "10.14.1")
+        ]
+        data["spoofed_device"] = random.choice(flagship_devices)
+        
+    d_model, s_ver, a_ver = data["spoofed_device"]
+    
+    kwargs = {
+        "flood_sleep_threshold": 0, 
+        "connection_retries": 3,
+        "device_model": d_model,
+        "system_version": s_ver,
+        "app_version": a_ver,
+        "lang_code": "en",
+        "system_lang_code": "en"
+    }
+    
+    if proxies:
+        kwargs["proxy"] = random.choice(proxies)
+        
+    return kwargs
+
 @bot_client.on(events.NewMessage(pattern='(?i)^/login'))
 async def login_handler(event):
     user_id = event.sender_id
@@ -372,7 +403,9 @@ async def login_handler(event):
     
     # Check existing session
     if data["client"] is None and data.get("session_string"):
-        client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, flood_sleep_threshold=0, connection_retries=3)
+        kwargs = get_client_kwargs(data)
+        save_state()
+        client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, **kwargs)
         await client.connect()
         if await client.is_user_authorized():
             data["client"] = client
@@ -413,7 +446,9 @@ async def message_handler(event):
             return
             
         data["phone"] = phone
-        client = TelegramClient(StringSession(""), API_ID, API_HASH, flood_sleep_threshold=0, connection_retries=3)
+        kwargs = get_client_kwargs(data)
+        save_state()
+        client = TelegramClient(StringSession(""), API_ID, API_HASH, **kwargs)
         
         try:
             await client.connect()
@@ -1035,40 +1070,19 @@ async def runner_engine(user_id: int, chat_id: int):
             has_string = bool(data.get("session_string"))
             
             if has_string:
-                proxies = data.get("user_proxies", [])
+                kwargs = get_client_kwargs(data)
                 
-                # Hardware Spoofing (Persistent Device Fingerprinting)
-                if "spoofed_device" not in data:
-                    flagship_devices = [
-                        ("iPhone 15 Pro Max", "iOS 17.5.1", "10.14.1"),
-                        ("Samsung Galaxy S24 Ultra", "Android 14", "10.14.1"),
-                        ("Google Pixel 8 Pro", "Android 14", "10.14.1"),
-                        ("OnePlus 12", "Android 14", "10.14.1"),
-                        ("Xiaomi 14 Pro", "Android 14", "10.14.1")
-                    ]
-                    data["spoofed_device"] = random.choice(flagship_devices)
-                    save_state()
-                    
-                d_model, s_ver, a_ver = data["spoofed_device"]
+                # We can optionally send an alert about what we spoofed
+                d_model, s_ver, _ = data["spoofed_device"]
                 
-                client_kwargs = {
-                    "flood_sleep_threshold": 0, 
-                    "connection_retries": 3,
-                    "device_model": d_model,
-                    "system_version": s_ver,
-                    "app_version": a_ver,
-                    "lang_code": "en",
-                    "system_lang_code": "en"
-                }
-                
-                if proxies:
-                    p = random.choice(proxies)
-                    client_kwargs["proxy"] = p
+                if "proxy" in kwargs:
+                    # To display proxy info safely, we check original list since kwargs["proxy"] is a dict
+                    p = kwargs["proxy"]
                     await send_alert(user_id, chat_id, f"🌐 **Proxy Connected:** Engine started on {p['proxy_type'].upper()} proxy ({p['addr']})")
                     
                 await send_alert(user_id, chat_id, f"📱 **Hardware Spoofed:** Connected to Telegram servers disguised as `{d_model}` running `{s_ver}`")
                     
-                user_client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, **client_kwargs)
+                user_client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, **kwargs)
                     
                 await user_client.connect()
                 data["client"] = user_client
