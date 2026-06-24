@@ -371,8 +371,13 @@ async def login_handler(event):
     data = get_user_data(user_id)
     
     # Check existing session
-    if data["client"] is None and data.get("session_string"):
-        client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, flood_sleep_threshold=0, connection_retries=3)
+    session_file = f'sessions/user_{user_id}.session'
+    if data["client"] is None and (os.path.exists(session_file) or data.get("session_string")):
+        if data.get("session_string") and not os.path.exists(session_file):
+            client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, flood_sleep_threshold=0, connection_retries=3)
+        else:
+            client = TelegramClient(f'sessions/user_{user_id}', API_ID, API_HASH, flood_sleep_threshold=0, connection_retries=3)
+            
         await client.connect()
         if await client.is_user_authorized():
             data["client"] = client
@@ -413,7 +418,7 @@ async def message_handler(event):
             return
             
         data["phone"] = phone
-        client = TelegramClient(StringSession(""), API_ID, API_HASH, flood_sleep_threshold=0, connection_retries=3)
+        client = TelegramClient(f'sessions/user_{user_id}', API_ID, API_HASH, flood_sleep_threshold=0, connection_retries=3)
         
         try:
             await client.connect()
@@ -445,7 +450,9 @@ async def message_handler(event):
         client = data["client"]
         try:
             await client.sign_in(data["phone"], code, phone_code_hash=data["phone_code_hash"])
-            data["session_string"] = client.session.save()
+            # Remove string session, we are using file sessions now
+            if "session_string" in data:
+                del data["session_string"]
             data["login_state"] = None
             data["first_login_time"] = time.time()
             save_state()
@@ -468,7 +475,8 @@ async def message_handler(event):
         client = data["client"]
         try:
             await client.sign_in(password=password)
-            data["session_string"] = client.session.save()
+            if "session_string" in data:
+                del data["session_string"]
             data["login_state"] = None
             data["first_login_time"] = time.time()
             save_state()
@@ -1032,7 +1040,10 @@ async def runner_engine(user_id: int, chat_id: int):
         user_client = data.get("client")
         if user_client is None:
             session_file = f'sessions/user_{user_id}.session'
-            if os.path.exists(session_file):
+            has_file = os.path.exists(session_file)
+            has_string = bool(data.get("session_string"))
+            
+            if has_file or has_string:
                 proxies = data.get("user_proxies", [])
                 
                 # Hardware Spoofing (Persistent Device Fingerprinting)
@@ -1066,7 +1077,11 @@ async def runner_engine(user_id: int, chat_id: int):
                     
                 await send_alert(user_id, chat_id, f"📱 **Hardware Spoofed:** Connected to Telegram servers disguised as `{d_model}` running `{s_ver}`")
                     
-                user_client = TelegramClient(f'sessions/user_{user_id}', API_ID, API_HASH, **client_kwargs)
+                if has_string:
+                    user_client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, **client_kwargs)
+                else:
+                    user_client = TelegramClient(f'sessions/user_{user_id}', API_ID, API_HASH, **client_kwargs)
+                    
                 await user_client.connect()
                 data["client"] = user_client
             else:
