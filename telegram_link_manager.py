@@ -307,14 +307,14 @@ def add_live_log(user_id: int, msg: str):
 async def send_alert(user_id: int, chat_id: int, msg: str, priority="NORMAL"):
     add_live_log(user_id, msg)
     
+    # FORCE SILENT MODE to protect bandwidth. Only send HIGH priority (like PANIC MODE).
+    if priority != "HIGH" and priority != "CRITICAL":
+        return
+        
     data = get_user_data(user_id)
     mode = data.get("notification_mode", "SILENT")
     
     if mode == "SILENT":
-        return
-    if mode == "VIRAL_ONLY" and priority != "HIGH":
-        return
-    if mode == "ALL" and priority == "LOW": # Prevent spam even on ALL setting
         return
         
     await bot_client.send_message(chat_id, msg)
