@@ -212,7 +212,7 @@ async def _save_state_async():
             try:
                 await db_collection.update_one({"user_id": str(user_id)}, {"$set": doc}, upsert=True)
             except Exception as e:
-                pass
+                logger.error(f"🚨 CRITICAL MONGODB SAVE ERROR: {e}")
                 
     try:
         with open(STATE_FILE, 'w') as f:
@@ -276,17 +276,17 @@ def extract_hash(link: str) -> str:
     if 't.me/' in link: return link.split('t.me/')[-1]
     return link
 
-def get_link_grade(checks: int, joins: int) -> str:
-    if checks < 5: return "🆕 (Init)"
-    if joins == 0 and checks >= 50: return "💀 F (Dead)"
-    if joins == 0: return "📉 D"
+def get_link_grade(checks: float, joins: float) -> str:
+    if checks < 3: return "🆕 (Init)"
+    if joins < 0.1 and checks >= 15: return "💀 F (Dead)"
     
-    ratio = joins / checks
-    if ratio >= 0.10: return "🔥 A+"
-    if ratio >= 0.05: return "⭐ A"
-    if ratio >= 0.02: return "📈 B"
-    if ratio >= 0.005: return "📊 C"
-    return "📉 D"
+    ratio = joins / checks if checks > 0 else 0
+    if ratio >= 0.50: return "🔥 A+ (Viral)"
+    if ratio >= 0.20: return "⭐ A (Excellent)"
+    if ratio >= 0.10: return "📈 B (Good)"
+    if ratio >= 0.05: return "📊 C (Average)"
+    if ratio >= 0.01: return "📉 D (Slow)"
+    return "🥱 E (Very Slow)"
 
 def add_live_log(user_id: int, msg: str):
     data = get_user_data(user_id)
@@ -542,6 +542,11 @@ async def message_handler(event):
         client = data["client"]
         try:
             await client.sign_in(data["phone"], code, phone_code_hash=data["phone_code_hash"])
+            # Human App Simulation: Fetch recent dialogs immediately to prove we are a real app UI loading
+            try: await client.get_dialogs(limit=5) 
+            except: pass
+            
+            # Save the session string AFTER fetching dialogs in case the Data Center IP was migrated
             data["session_string"] = client.session.save()
             data["login_state"] = None
             data["first_login_time"] = time.time()
@@ -565,6 +570,11 @@ async def message_handler(event):
         client = data["client"]
         try:
             await client.sign_in(password=password)
+            # Human App Simulation
+            try: await client.get_dialogs(limit=5) 
+            except: pass
+            
+            # Save session AFTER dialogs
             data["session_string"] = client.session.save()
             data["login_state"] = None
             data["first_login_time"] = time.time()
@@ -785,6 +795,8 @@ async def callback_handler(event):
             kwargs = get_client_kwargs(data)
             client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, **kwargs)
             await client.connect()
+            try: await client.get_me() # Forces Telegram to globally sync the AuthKey on a new Render IP
+            except: pass
             if await client.is_user_authorized():
                 data["client"] = client
                 
@@ -1227,7 +1239,19 @@ async def runner_engine(user_id: int, chat_id: int):
                 user_client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, **kwargs)
                     
                 await user_client.connect()
+                try: await user_client.get_me() # Sync AuthKey
+                except: pass
+                
                 data["client"] = user_client
+                
+                # Boot Delay (Protect new sessions from instant API requests upon server restarts)
+                uptime = time.time() - data.get("engine_uptime_start", time.time())
+                if uptime < 300:
+                    is_warmup = (time.time() - data.get("first_login_time", 0)) < (3 * 86400)
+                    if is_warmup:
+                        delay_left = 300 - int(uptime)
+                        await send_alert(user_id, chat_id, f"🛡️ **Warmup Protection:** Delaying engine start for {delay_left}s to prevent Telegram anti-spam from flagging your new session.", priority="CRITICAL")
+                        await interruptible_sleep(delay_left, user_id)
                 # Save the session string immediately in case connecting updated the AuthKey or Datacenter
                 data["session_string"] = user_client.session.save()
                 save_state()
@@ -1358,9 +1382,10 @@ async def runner_engine(user_id: int, chat_id: int):
         try:
             invite_info = await user_client(CheckChatInviteRequest(hash_str))
             
-            # Record analytics: 1 Check
-            perf = data.setdefault("link_performance", {}).setdefault(hash_str, {"checks": 0, "joins": 0})
-            perf["checks"] += 1
+            # Record analytics: Ultra-Fast EMA
+            perf = data.setdefault("link_performance", {}).setdefault(hash_str, {"checks": 0.0, "joins": 0.0})
+            perf["checks"] = (perf.get("checks", 0) * 0.8) + 1.0
+            perf["joins"] = (perf.get("joins", 0) * 0.8)
             
             # Extract participants count
             if hasattr(invite_info, 'participants_count'):
@@ -1466,14 +1491,15 @@ async def runner_engine(user_id: int, chat_id: int):
                 
                 data["daily_joins"].append(time.time())
                 
-                # Record analytics: 1 Join
-                perf = data.setdefault("link_performance", {}).setdefault(hash_str, {"checks": 0, "joins": 0})
-                perf["joins"] += 1
+                # Record analytics: 1 Join (Add to decayed value)
+                perf = data.setdefault("link_performance", {}).setdefault(hash_str, {"checks": 0.0, "joins": 0.0})
+                perf["joins"] = perf.get("joins", 0) + 1.0
                 
                 # RESURRECTION FROM HIBERNATION
                 if hash_str in data.get("hibernating_links", []):
                     data["hibernating_links"].remove(hash_str)
-                    perf["checks"] = 0 # Reset checks so grade is back to 🆕
+                    perf["checks"] = 0.0 # Reset checks so grade is back to 🆕
+                    perf["joins"] = 0.0
                     await send_alert(user_id, chat_id, f"🎉 **RESURRECTED:** `{link}` was dead but just got traffic! Removing from Hibernation and pushing to Active Queue!", priority="HIGH")
                     
                 # Peak Hour AI Recording
@@ -1689,6 +1715,9 @@ async def main():
                     kwargs = get_client_kwargs(data)
                     client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, **kwargs)
                     await client.connect()
+                    try: await client.get_me() # Sync AuthKey
+                    except: pass
+                    
                     if await client.is_user_authorized():
                         data["client"] = client
                 except Exception as e:
