@@ -307,8 +307,8 @@ def add_live_log(user_id: int, msg: str):
 async def send_alert(user_id: int, chat_id: int, msg: str, priority="NORMAL"):
     add_live_log(user_id, msg)
     
-    # FORCE SILENT MODE to protect bandwidth. Only send HIGH priority (like PANIC MODE).
-    if priority != "HIGH" and priority != "CRITICAL":
+    # FORCE SILENT MODE to protect bandwidth. Only send CRITICAL priority.
+    if priority != "CRITICAL":
         return
         
     data = get_user_data(user_id)
@@ -1532,7 +1532,7 @@ async def runner_engine(user_id: int, chat_id: int):
                     data["panic_mode_until"] = now + 7200 # 2 Hours
                     data["flood_history"] = []
                     save_state()
-                    await send_alert(user_id, chat_id, f"🚨 **PANIC MODE ACTIVATED!** Caught 3 API limits in 15 mins. Entire engine is going into Deep Sleep for 2 HOURS to cool down account safety flags.", priority="HIGH")
+                    await send_alert(user_id, chat_id, f"🚨 **PANIC MODE ACTIVATED!** Caught 3 API limits in 15 mins. Entire engine is going into Deep Sleep for 2 HOURS to cool down account safety flags.", priority="CRITICAL")
                     if not await interruptible_sleep(10, user_id): break
                     continue
                     
