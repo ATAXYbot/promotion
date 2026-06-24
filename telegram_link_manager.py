@@ -270,7 +270,26 @@ def get_link_grade(checks: int, joins: int) -> str:
     if ratio >= 0.005: return "📊 C"
     return "📉 D"
 
+def add_live_log(user_id: int, msg: str):
+    data = get_user_data(user_id)
+    logs = data.setdefault("live_log", [])
+    
+    # Create timestamp [hh:mm AM/PM]
+    timestamp = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5, minutes=30))).strftime("[%I:%M %p]")
+    
+    # Clean up multiline messages for the log
+    clean_msg = msg.replace('\n', ' ')
+    if len(clean_msg) > 80:
+        clean_msg = clean_msg[:77] + "..."
+        
+    logs.append(f"`{timestamp}` {clean_msg}")
+    if len(logs) > 10:
+        data["live_log"] = logs[-10:]
+    save_state()
+
 async def send_alert(user_id: int, chat_id: int, msg: str, priority="NORMAL"):
+    add_live_log(user_id, msg)
+    
     data = get_user_data(user_id)
     mode = data.get("notification_mode", "ALL")
     
@@ -324,9 +343,9 @@ async def show_menu(chat_id: int, user_id: int, event=None):
         return
 
     keyboard = [
-        [Button.inline("▶️ START ENGINE", b"start_loop"), Button.inline("⏸️ STOP", b"stop_loop")],
-        [Button.inline("➕ Add Link", b"add_link"), Button.inline("📊 Live Queue", b"show_queue")],
-        [Button.inline("⚙️ Settings & Proxy", b"settings_menu")],
+        [Button.inline("▶️ START ENGINE", b"start_loop"), Button.inline("⏸️ STOP ENGINE", b"stop_loop")],
+        [Button.inline("➕ Add New Link", b"add_link"), Button.inline("📊 Live Queue", b"show_queue")],
+        [Button.inline("📝 Live Logs", b"show_live_log"), Button.inline("⚙️ Settings & Proxy", b"settings_menu")],
         [Button.inline("🚪 Secure Logout", b"logout")]
     ]
     status = "🟢 ACTIVE (Running)" if data["loop_active"] else "🔴 PAUSED (Stopped)"
@@ -700,6 +719,38 @@ async def message_handler(event):
             async def edit(self, *args, **kwargs): pass
             async def answer(self, *args, **kwargs): pass
         await callback_handler(DummyEvent())
+        
+    else:
+        # Smart Bulk Link Extractor fallback
+        text = event.text.strip()
+        if 't.me' in text:
+            # Find all links that look like Telegram links
+            links = re.findall(r'(?:https?://)?t\.me/[^\s]+', text)
+            if links:
+                added = 0
+                for l in links:
+                    # Clean up trailing punctuation if any
+                    l = l.rstrip("),.\"\'")
+                    # Ensure prefix
+                    if not l.startswith("http"):
+                        l = "https://" + l
+                        
+                    if l not in data["queue"]:
+                        data["queue"].append(l)
+                        added += 1
+                
+                if added > 0:
+                    save_state()
+                    await event.respond(f"🧠 **Smart Extractor**\n✅ Found and added **{added}** new links to your queue!\n*(Total Links: {len(data['queue'])})*")
+                else:
+                    await event.respond("⚠️ All found links are already in your queue.")
+                    
+                # Clean up the massive forwarded message
+                try:
+                    await event.delete()
+                except:
+                    pass
+                await show_menu(event.chat_id, user_id)
 
 @bot_client.on(events.CallbackQuery())
 async def callback_handler(event):
@@ -798,11 +849,33 @@ async def callback_handler(event):
     elif cb_data == "back_to_menu":
         await show_menu(event.chat_id, user_id, event=event)
         
+    elif cb_data.startswith("show_live_log"):
+        logs = data.get("live_log", [])
+        msg = "📝 **LIVE ENGINE LOG**\n"
+        msg += "━━━━━━━━━━━━━━━━━━━━━━\n"
+        if not logs:
+            msg += "*(No recent actions recorded.)*\n"
+        else:
+            for log_entry in reversed(logs):
+                msg += f"{log_entry}\n"
+        msg += "━━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += "*Click Refresh to fetch latest events.*\n"
+        
+        keyboard = [
+            [Button.inline("🔄 Refresh Log", b"show_live_log_refresh")],
+            [Button.inline("🔙 Back to Dashboard", b"back_to_menu")]
+        ]
+        await event.edit(msg, buttons=keyboard)
+        
+    elif cb_data == "show_live_log_refresh":
+        event.data = b"show_live_log"
+        await callback_handler(event)
+        
     elif cb_data == "proxies_menu":
         proxies = data.get("user_proxies", [])
         msg = f"🌐 **PROXY MANAGER (IP ROTATION)**\n"
         msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        msg += f"**Active Nodes:** `{len(proxies)}`\n\n"
+        msg += f"**Active Proxies:** `{len(proxies)}`\n\n"
         if proxies:
             for i, p in enumerate(proxies):
                 msg += f"🟢 `[{i + 1}]` **{p['proxy_type'].upper()}** ➔ `{p['addr']}:{p['port']}`\n"
@@ -880,12 +953,12 @@ async def callback_handler(event):
             else:
                 check_time = data.get("link_schedule", {}).get(hash_str, 0)
                 if check_time == 0:
-                    status = "⏳ WAITING"
+                    status = "⏳ WAITING FOR SCAN"
                 elif check_time <= now:
                     status = "🔥 ACTIVE NOW"
                 else:
                     wait_sec = int(check_time - now)
-                    status = f"🕒 IN {wait_sec // 60}M {wait_sec % 60}S"
+                    status = f"🕒 IN {wait_sec // 60:02d}:{wait_sec % 60:02d}"
                     
             short_link = l[:35] + "..." if len(l) > 35 else l
             clean_link = short_link.replace("https://", "").replace("t.me/", "")
@@ -911,6 +984,7 @@ async def callback_handler(event):
         if nav_buttons:
             keyboard.append(nav_buttons)
             
+        keyboard.append([Button.inline("🔄 Refresh Live Queue", b"show_queue_refresh")])
         keyboard.append([Button.inline("🧹 Prune Dead Links", b"prune_dead_links")])
         keyboard.append([Button.inline("🔙 Back to Dashboard", b"back_to_menu")])
         await event.edit(msg, buttons=keyboard, link_preview=False)
@@ -968,8 +1042,8 @@ async def callback_handler(event):
                 msg += f"**Status:** 🕒 IN {wait_sec // 60}M {wait_sec % 60}S\n"
         msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 
-        pause_btn = Button.inline("🔴 PAUSED (Resume)", f"resume_link_{idx}".encode('utf-8')) if is_paused else Button.inline("🟢 ACTIVE (Pause)", f"pause_link_{idx}".encode('utf-8'))
-        stop_btn = Button.inline("🔴 STOPPED (Start)", f"start_link_{idx}".encode('utf-8')) if is_stopped else Button.inline("⏹️ Stop Link", f"stop_link_{idx}".encode('utf-8'))
+        pause_btn = Button.inline("🟡 PAUSED [RESUME]", f"resume_link_{idx}".encode('utf-8')) if is_paused else Button.inline("🟢 ACTIVE [PAUSE]", f"pause_link_{idx}".encode('utf-8'))
+        stop_btn = Button.inline("🔴 STOPPED [START]", f"start_link_{idx}".encode('utf-8')) if is_stopped else Button.inline("🛑 STOP LINK", f"stop_link_{idx}".encode('utf-8'))
         
         sched_row = [Button.inline("🕒 Edit Schedule", f"set_sched_{idx}".encode('utf-8')), Button.inline("❌ Clear Schedule", f"clr_sched_{idx}".encode('utf-8'))] if active_hours else [Button.inline("🕒 Set Schedule", f"set_sched_{idx}".encode('utf-8'))]
         
