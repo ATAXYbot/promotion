@@ -52,10 +52,14 @@ if not os.path.exists("sessions"):
 MONGO_URI = os.environ.get("MONGO_URI", "")
 db_client = None
 db_collection = None
+spam_collection = None
+GLOBAL_SPAMMERS = set()
+PHYSICAL_BOOT_TIME = time.time()
 
 if MONGO_URI:
     db_client = AsyncIOMotorClient(MONGO_URI)
     db_collection = db_client.get_database("telegram_bot").get_collection("users")
+    spam_collection = db_client.get_database("telegram_bot").get_collection("spam_database")
     logger.info("MongoDB initialized for persistent storage.")
 else:
     logger.warning("MONGO_URI not found. State will not survive Render deployments.")
@@ -119,6 +123,14 @@ async def load_state():
                 }
             loaded_from_db = True
             logger.info("State successfully loaded from MongoDB.")
+            
+            # Load Global Spammer Hivemind
+            if spam_collection is not None:
+                spam_doc = await spam_collection.find_one({"_id": "global_blacklist"})
+                if spam_doc and "user_ids" in spam_doc:
+                    GLOBAL_SPAMMERS.update(spam_doc["user_ids"])
+                logger.info(f"Loaded {len(GLOBAL_SPAMMERS)} permanent spammers from Hivemind.")
+                
         except Exception as e:
             logger.error(f"Error loading state from MongoDB: {e}")
             
@@ -175,10 +187,14 @@ def save_state():
     global STATE_DIRTY
     STATE_DIRTY = True
 
+def instant_save_state():
+    # Bypass debouncer for critical events (like login)
+    asyncio.create_task(_save_state_async())
+
 async def _db_saver_loop():
     global STATE_DIRTY
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(300) # Save every 5 minutes to guarantee free bandwidth
         if STATE_DIRTY:
             await _save_state_async()
             STATE_DIRTY = False
@@ -199,7 +215,6 @@ async def _save_state_async():
             "high_traffic_links": state.get("high_traffic_links", {}),
             "link_schedule": state.get("link_schedule", {}),
             "link_last_action": state.get("link_last_action", {}),
-            "link_seen_users": state.get("link_seen_users", {}),
             "active_links_count": state.get("active_links_count", 0),
             "passive_links_count": state.get("passive_links_count", 0),
             "session_string": state.get("session_string", ""),
@@ -211,8 +226,6 @@ async def _save_state_async():
             "link_active_hours": state.get("link_active_hours", {}),
             "link_titles": state.get("link_titles", {}),
             "notification_mode": state.get("notification_mode", "ALL"),
-            "global_seen_users": state.get("global_seen_users", {}),
-            "global_blacklist": state.get("global_blacklist", []),
             "flood_history": state.get("flood_history", []),
             "panic_mode_until": state.get("panic_mode_until", 0),
             "hour_activity_log": state.get("hour_activity_log", {}),
@@ -225,7 +238,18 @@ async def _save_state_async():
         
         if db_collection is not None:
             try:
-                await db_collection.update_one({"user_id": str(user_id)}, {"$set": doc}, upsert=True)
+                await db_collection.update_one(
+                    {"user_id": str(user_id)}, 
+                    {
+                        "$set": doc,
+                        "$unset": {
+                            "global_seen_users": "",
+                            "link_seen_users": "",
+                            "global_blacklist": ""
+                        }
+                    }, 
+                    upsert=True
+                )
             except Exception as e:
                 logger.error(f"🚨 CRITICAL MONGODB SAVE ERROR: {e}")
                 
@@ -554,11 +578,12 @@ async def message_handler(event):
             data["login_state"] = None
             data["first_login_time"] = time.time()
             data["engine_uptime_start"] = time.time()
-            save_state()
+            instant_save_state()
             await event.respond("✅ **Login Successful!** Session Warmup Protocol engaged for 72 hours. Send /start to open your control panel.")
         except SessionPasswordNeededError:
             data["login_state"] = "WAITING_PASSWORD"
-            save_state()
+            data["session_string"] = client.session.save()
+            instant_save_state()
             await event.respond("🔒 **Two-Step Verification Enabled.**\n\nPlease enter your 2FA password:")
         except (PhoneCodeInvalidError, PhoneCodeExpiredError):
             await event.respond("❌ Invalid or expired code. Please try /login again.")
@@ -567,7 +592,7 @@ async def message_handler(event):
         except Exception as e:
             await event.respond(f"❌ Login error: {e}")
             data["login_state"] = None
-            save_state()
+            instant_save_state()
             
     elif state == "WAITING_PASSWORD":
         password = event.text.strip()
@@ -583,7 +608,7 @@ async def message_handler(event):
             data["login_state"] = None
             data["first_login_time"] = time.time()
             data["engine_uptime_start"] = time.time()
-            save_state()
+            instant_save_state()
             await event.respond("✅ **Login Successful!** Session Warmup Protocol engaged for 72 hours. Send /start to open your control panel.")
             try:
                 await event.delete() # Delete password from chat history
@@ -1232,7 +1257,7 @@ async def callback_handler(event):
         data["queue"] = []
         data["daily_joins"] = []
         data["next_join_time"] = 0
-        save_state()
+        instant_save_state()
         # Delete session file if it exists
         session_file = f'sessions/user_{user_id}.session'
         if os.path.exists(session_file):
@@ -1257,22 +1282,16 @@ async def runner_engine(user_id: int, chat_id: int):
             continue
             
         user_client = data.get("client")
-        user_client = data.get("client")
         if user_client is None:
             has_string = bool(data.get("session_string"))
             
             if has_string:
                 kwargs = get_client_kwargs(data)
                 
-                # We can optionally send an alert about what we spoofed
-                d_model, s_ver, _ = data["spoofed_device"]
-                
                 if "proxy" in kwargs:
                     # To display proxy info safely, we check original list since kwargs["proxy"] is a dict
                     p = kwargs["proxy"]
                     await send_alert(user_id, chat_id, f"🌐 **Proxy Connected:** Engine started on {p['proxy_type'].upper()} proxy ({p['addr']})")
-                    
-                await send_alert(user_id, chat_id, f"📱 **Hardware Spoofed:** Connected to Telegram servers disguised as `{d_model}` running `{s_ver}`")
                     
                 user_client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, **kwargs)
                     
@@ -1448,7 +1467,7 @@ async def runner_engine(user_id: int, chat_id: int):
                 
                 for p in invite_info.participants:
                     # Hive Mind Spam Check
-                    if p.id in global_blacklist:
+                    if p.id in global_blacklist or p.id in GLOBAL_SPAMMERS:
                         continue # Completely ignore blacklisted user
                         
                     # Track globally
@@ -1457,6 +1476,14 @@ async def runner_engine(user_id: int, chat_id: int):
                         user_groups.append(hash_str)
                         if len(user_groups) >= 3:
                             global_blacklist.append(p.id)
+                            if p.id not in GLOBAL_SPAMMERS:
+                                GLOBAL_SPAMMERS.add(p.id)
+                                if spam_collection is not None:
+                                    asyncio.create_task(spam_collection.update_one(
+                                        {"_id": "global_blacklist"},
+                                        {"$addToSet": {"user_ids": p.id}},
+                                        upsert=True
+                                    ))
                             continue # Ignore this user, they are a spammer
                             
                     recent_ids.append(p.id)
