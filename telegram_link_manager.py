@@ -13,6 +13,9 @@ import random
 import time
 import re
 import json
+import platform
+import psutil
+import socket
 from datetime import datetime, timezone, timedelta
 from motor.motor_asyncio import AsyncIOMotorClient
 from telethon.sessions import StringSession
@@ -364,6 +367,7 @@ async def show_menu(chat_id: int, user_id: int, event=None):
         [Button.inline("▶️ START ENGINE", b"start_loop"), Button.inline("⏸️ STOP ENGINE", b"stop_loop")],
         [Button.inline("➕ Add New Link", b"add_link"), Button.inline("📊 Live Queue", b"show_queue")],
         [Button.inline("📝 Live Logs", b"show_live_log"), Button.inline("⚙️ Settings & Proxy", b"settings_menu")],
+        [Button.inline("🩺 Live Diagnostics", b"show_diagnostics")],
         [Button.inline("🚪 Secure Logout", b"logout")]
     ]
     status = "🟢 ACTIVE (Running)" if data["loop_active"] else "🔴 PAUSED (Stopped)"
@@ -430,8 +434,11 @@ def get_client_kwargs(data):
     kwargs = {
         "flood_sleep_threshold": 0, 
         "connection_retries": 3,
+        "device_model": "Desktop",
+        "system_version": "Windows 11",
+        "app_version": "4.16.8 x64",
         "lang_code": "en",
-        "system_lang_code": "en"
+        "system_lang_code": "en-US"
     }
     
     if proxies:
@@ -535,6 +542,7 @@ async def message_handler(event):
             data["session_string"] = client.session.save()
             data["login_state"] = None
             data["first_login_time"] = time.time()
+            data["engine_uptime_start"] = time.time()
             save_state()
             await event.respond("✅ **Login Successful!** Session Warmup Protocol engaged for 72 hours. Send /start to open your control panel.")
         except SessionPasswordNeededError:
@@ -563,6 +571,7 @@ async def message_handler(event):
             data["session_string"] = client.session.save()
             data["login_state"] = None
             data["first_login_time"] = time.time()
+            data["engine_uptime_start"] = time.time()
             save_state()
             await event.respond("✅ **Login Successful!** Session Warmup Protocol engaged for 72 hours. Send /start to open your control panel.")
             try:
@@ -786,7 +795,6 @@ async def callback_handler(event):
                 data["client"] = client
             else:
                 await client.disconnect() # PREVENT TCP LEAK
-                data["session_string"] = "" # Clear dead session to prevent 3-second button lag
                 save_state()
                 
     if data["client"] is None:
@@ -810,6 +818,33 @@ async def callback_handler(event):
         data["login_state"] = "WAITING_REMOVE_LINK"
         save_state()
         await event.respond(msg)
+        
+    elif cb_data == "show_diagnostics":
+        process_uptime = int(time.time() - PHYSICAL_BOOT_TIME)
+        p_up_str = f"{process_uptime // 60}m {process_uptime % 60}s"
+        
+        has_client = data["client"] is not None
+        sess_len = len(data.get("session_string", ""))
+        
+        diag_msg = "🩺 **SYSTEM DIAGNOSTICS**\n"
+        diag_msg += "━━━━━━━━━━━━━━━━━━━━━━\n"
+        diag_msg += f"**Physical Server Uptime:** `{p_up_str}`\n"
+        diag_msg += f"**Active Client Object:** `{'YES' if has_client else 'NO (Wiped)'}`\n"
+        diag_msg += f"**Saved Session Length:** `{sess_len} chars`\n"
+        diag_msg += "━━━━━━━━━━━━━━━━━━━━━━\n"
+        diag_msg += "*If Physical Uptime is low but Engine Uptime is high, Render forcefully restarted your server in the background!*\n"
+        
+        # Try to fetch current IP
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get('https://api.ipify.org?format=json', timeout=3) as r:
+                    res = await r.json()
+                    diag_msg += f"\n**Current Server IP:** `{res['ip']}`"
+        except:
+            pass
+            
+        await event.answer("Diagnostics Loaded", alert=False)
+        await event.respond(diag_msg)
         
     elif cb_data == "start_loop":
         if not data["queue"]:
@@ -1717,7 +1752,6 @@ async def main():
                         data["client"] = client
                     else:
                         await client.disconnect()
-                        data["session_string"] = ""
                         save_state()
                 except Exception as e:
                     logger.error(f"Failed to resume session for {uid}: {e}")
