@@ -169,6 +169,20 @@ async def load_state():
         except Exception as e:
             logger.error(f"Error loading state from local file: {e}")
 
+STATE_DIRTY = False
+
+def save_state():
+    global STATE_DIRTY
+    STATE_DIRTY = True
+
+async def _db_saver_loop():
+    global STATE_DIRTY
+    while True:
+        await asyncio.sleep(60)
+        if STATE_DIRTY:
+            await _save_state_async()
+            STATE_DIRTY = False
+
 async def _save_state_async():
     state_to_save = {}
     for user_id, state in user_data.items():
@@ -220,9 +234,6 @@ async def _save_state_async():
             json.dump(state_to_save, f)
     except Exception as e:
         logger.error(f"Error saving local state: {e}")
-
-def save_state():
-    asyncio.create_task(_save_state_async())
 
 def get_user_data(user_id):
     if user_id not in user_data:
@@ -1735,6 +1746,9 @@ async def main():
     logger.info("Starting Bot Client...")
     await start_web_server()
     await bot_client.start(bot_token=BOT_TOKEN)
+    
+    # Start the periodic DB Saver loop to conserve bandwidth
+    asyncio.create_task(_db_saver_loop())
     
     await load_state()
     logger.info(f"Loaded state for {len(user_data)} users.")
