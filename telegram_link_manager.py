@@ -789,7 +789,7 @@ async def callback_handler(event):
                 data["session_string"] = "" # Clear dead session to prevent 3-second button lag
                 save_state()
                 
-    if data["client"] is None or not await data["client"].is_user_authorized():
+    if data["client"] is None:
         await event.answer("You are not logged in! Send /login", alert=True)
         return
         
@@ -888,6 +888,7 @@ async def callback_handler(event):
             [Button.inline("🔙 Back to Dashboard", b"back_to_menu")]
         ]
         await event.edit(msg, buttons=keyboard)
+        await event.answer()
         
     elif cb_data == "show_live_log_refresh":
         event.data = b"show_live_log"
@@ -1008,6 +1009,7 @@ async def callback_handler(event):
         keyboard.append([Button.inline("🧹 Prune Dead Links", b"prune_dead_links")])
         keyboard.append([Button.inline("🔙 Back to Dashboard", b"back_to_menu")])
         await event.edit(msg, buttons=keyboard, link_preview=False)
+        await event.answer()
         
     elif cb_data.startswith("manage_link_"):
         idx = int(cb_data.split("_")[2])
@@ -1071,6 +1073,7 @@ async def callback_handler(event):
             [Button.inline("🔙 Back to Queue", b"show_queue_refresh")]
         ]
         await event.edit(msg, buttons=keyboard, link_preview=False)
+        await event.answer()
         
     elif cb_data == "show_queue_refresh":
         event.data = b"show_queue_refresh"
