@@ -112,8 +112,7 @@ async def load_state():
                     "engine_uptime_start": doc.get("engine_uptime_start", time.time()),
                     "user_proxies": doc.get("user_proxies", []),
                     "hibernating_links": doc.get("hibernating_links", []),
-                    "first_login_time": doc.get("first_login_time", 0),
-                    "spoofed_device": doc.get("spoofed_device", None)
+                    "first_login_time": doc.get("first_login_time", 0)
                 }
             loaded_from_db = True
             logger.info("State successfully loaded from MongoDB.")
@@ -203,8 +202,7 @@ async def _save_state_async():
             "engine_uptime_start": state.get("engine_uptime_start", time.time()),
             "user_proxies": state.get("user_proxies", []),
             "hibernating_links": state.get("hibernating_links", []),
-            "first_login_time": state.get("first_login_time", 0),
-            "spoofed_device": state.get("spoofed_device", None)
+            "first_login_time": state.get("first_login_time", 0)
         }
         state_to_save[str(user_id)] = doc
         
@@ -429,26 +427,9 @@ async def help_handler(event):
 def get_client_kwargs(data):
     proxies = data.get("user_proxies", [])
     
-    # Hardware Spoofing (Persistent Device Fingerprinting)
-    if not data.get("spoofed_device"):
-        flagship_devices = [
-            ("iPhone 15 Pro Max", "iOS 17.5.1", "10.14.1"),
-            ("Samsung Galaxy S24 Ultra", "Android 14", "10.14.1"),
-            ("Google Pixel 8 Pro", "Android 14", "10.14.1"),
-            ("OnePlus 12", "Android 14", "10.14.1"),
-            ("Xiaomi 14 Pro", "Android 14", "10.14.1")
-        ]
-        data["spoofed_device"] = random.choice(flagship_devices)
-        save_state()
-        
-    d_model, s_ver, a_ver = data["spoofed_device"]
-    
     kwargs = {
         "flood_sleep_threshold": 0, 
         "connection_retries": 3,
-        "device_model": d_model,
-        "system_version": s_ver,
-        "app_version": a_ver,
         "lang_code": "en",
         "system_lang_code": "en"
     }
