@@ -471,6 +471,10 @@ async def login_handler(event):
         await client.connect()
         if await client.is_user_authorized():
             data["client"] = client
+        else:
+            await client.disconnect()
+            data["session_string"] = ""
+            save_state()
             
     if data["client"] is not None and await data["client"].is_user_authorized():
         await event.respond("✅ You are already logged in! Send /start to open the panel.")
@@ -799,6 +803,10 @@ async def callback_handler(event):
             except: pass
             if await client.is_user_authorized():
                 data["client"] = client
+            else:
+                await client.disconnect() # PREVENT TCP LEAK
+                data["session_string"] = "" # Clear dead session to prevent 3-second button lag
+                save_state()
                 
     if data["client"] is None or not await data["client"].is_user_authorized():
         await event.answer("You are not logged in! Send /login", alert=True)
@@ -1720,6 +1728,10 @@ async def main():
                     
                     if await client.is_user_authorized():
                         data["client"] = client
+                    else:
+                        await client.disconnect()
+                        data["session_string"] = ""
+                        save_state()
                 except Exception as e:
                     logger.error(f"Failed to resume session for {uid}: {e}")
                     
