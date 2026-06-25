@@ -1672,18 +1672,21 @@ async def runner_engine(user_id: int, chat_id: int):
 # MAIN EXECUTION & DUMMY SERVER
 # ==========================================
 
-async def handle_dummy(request):
-    return web.Response(text="Bot is running and healthy!")
+async def handle_ping(request):
+    return web.Response(text="Bot is running!")
 
-async def start_dummy_server():
-    app = web.Application()
-    app.router.add_get('/', handle_dummy)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    logger.info(f"Dummy web server started on port {port} to satisfy Render deploy checks")
+async def start_web_server():
+    try:
+        app = web.Application()
+        app.router.add_get('/', handle_ping)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        port = int(os.environ.get("PORT", 8080))
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        logger.info(f"Web server started on port {port} for Render/UptimeRobot.")
+    except Exception as e:
+        logger.error(f"Web server failed to start: {e}")
 
 async def main():
     if API_ID == 0:
@@ -1692,7 +1695,7 @@ async def main():
         return
 
     logger.info("Starting Bot Client...")
-    await start_dummy_server()
+    await start_web_server()
     await bot_client.start(bot_token=BOT_TOKEN)
     
     await load_state()
