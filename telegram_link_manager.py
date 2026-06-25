@@ -1439,10 +1439,9 @@ async def runner_engine(user_id: int, chat_id: int):
         try:
             invite_info = await user_client(CheckChatInviteRequest(hash_str))
             
-            # Record analytics: Ultra-Fast EMA
-            perf = data.setdefault("link_performance", {}).setdefault(hash_str, {"checks": 0.0, "joins": 0.0})
-            perf["checks"] = (perf.get("checks", 0) * 0.8) + 1.0
-            perf["joins"] = (perf.get("joins", 0) * 0.8)
+            # Record analytics: Absolute Counters
+            perf = data.setdefault("link_performance", {}).setdefault(hash_str, {"checks": 0, "joins": 0})
+            perf["checks"] = int(perf.get("checks", 0)) + 1
             
             # Extract participants count
             if hasattr(invite_info, 'participants_count'):
@@ -1556,15 +1555,15 @@ async def runner_engine(user_id: int, chat_id: int):
                 
                 data["daily_joins"].append(time.time())
                 
-                # Record analytics: 1 Join (Add to decayed value)
-                perf = data.setdefault("link_performance", {}).setdefault(hash_str, {"checks": 0.0, "joins": 0.0})
-                perf["joins"] = perf.get("joins", 0) + 1.0
+                # Record analytics: 1 Join
+                perf = data.setdefault("link_performance", {}).setdefault(hash_str, {"checks": 0, "joins": 0})
+                perf["joins"] = int(perf.get("joins", 0)) + 1
                 
                 # RESURRECTION FROM HIBERNATION
                 if hash_str in data.get("hibernating_links", []):
                     data["hibernating_links"].remove(hash_str)
-                    perf["checks"] = 0.0 # Reset checks so grade is back to 🆕
-                    perf["joins"] = 0.0
+                    perf["checks"] = 0 # Reset checks so grade is back to 🆕
+                    perf["joins"] = 0
                     await send_alert(user_id, chat_id, f"🎉 **RESURRECTED:** `{link}` was dead but just got traffic! Removing from Hibernation and pushing to Active Queue!", priority="HIGH")
                     
                 # Peak Hour AI Recording
