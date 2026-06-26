@@ -686,31 +686,73 @@ async def message_handler(event):
         await show_menu(event.chat_id, user_id)
         
     elif state == "WAITING_BUSINESS_KEYWORD":
-        kw = event.text.strip().lower()
-        if not kw:
+        raw_text = event.message.message.strip()
+        
+        # Check if it's bulk format with "="
+        if "=" in raw_text and "\n" in raw_text:
+            lines = raw_text.split('\n')
+            added = 0
+            for line in lines:
+                if "=" in line:
+                    kw_part, reply_part = line.split("=", 1)
+                    kw = kw_part.strip().lower()
+                    reply_text = reply_part.strip()
+                    if kw and reply_text:
+                        # Process manual bracket emojis
+                        new_text, new_ents = process_manual_emojis(reply_text, [])
+                        ents_dicts = [ent.to_dict() if hasattr(ent, 'to_dict') else ent for ent in new_ents]
+                        
+                        data.setdefault("business_keyword_replies", {})[kw] = {
+                            "text": new_text,
+                            "entities": ents_dicts
+                        }
+                        added += 1
+            
+            data["login_state"] = None
+            instant_save_state()
+            await event.respond(f"✅ Successfully added {added} bulk keyword replies!")
+            await show_menu(event.chat_id, user_id)
+            return
+
+        # Otherwise it's single or comma-separated list
+        kws = [k.strip().lower() for k in raw_text.split(',') if k.strip()]
+        
+        if not kws:
             await event.respond("❌ Invalid keyword.")
         else:
-            data["temp_keyword"] = kw
+            data["temp_keyword"] = kws # Save as a list!
             data["login_state"] = "WAITING_BUSINESS_KEYWORD_REPLY"
             save_state()
-            await event.respond(f"✅ Keyword `{kw}` received.\nNow, send me the exact reply you want the bot to send when someone says this keyword:")
-            return # Don't show menu yet
+            if len(kws) > 1:
+                await event.respond(f"✅ {len(kws)} Keywords received: `{', '.join(kws)}`.\nNow, send me the exact reply you want the bot to send for ALL of these keywords:")
+            else:
+                await event.respond(f"✅ Keyword `{kws[0]}` received.\nNow, send me the exact reply you want the bot to send when someone says this keyword:")
+            return
             
     elif state == "WAITING_BUSINESS_KEYWORD_REPLY":
-        kw = data.get("temp_keyword")
-        if kw:
+        kws = data.get("temp_keyword")
+        if kws:
+            if isinstance(kws, str): kws = [kws] # backwards compatibility
+            
             raw_ents = event.message.entities if event.message.entities else []
             new_text, new_ents = process_manual_emojis(event.message.message, raw_ents)
             
             ents_dicts = [ent.to_dict() if hasattr(ent, 'to_dict') else ent for ent in new_ents]
-            data.setdefault("business_keyword_replies", {})[kw] = {
-                "text": new_text,
-                "entities": ents_dicts
-            }
+            
+            for kw in kws:
+                data.setdefault("business_keyword_replies", {})[kw] = {
+                    "text": new_text,
+                    "entities": ents_dicts
+                }
+                
             data.pop("temp_keyword", None)
             data["login_state"] = None
             instant_save_state()
-            await event.respond(f"✅ **Keyword Reply Saved!**\nWhenever someone says `{kw}`, the bot will instantly send this reply.")
+            
+            if len(kws) > 1:
+                await event.respond(f"✅ **Bulk Keyword Replies Saved!**\nWhenever someone says any of those {len(kws)} keywords, the bot will instantly send this reply.")
+            else:
+                await event.respond(f"✅ **Keyword Reply Saved!**\nWhenever someone says `{kws[0]}`, the bot will instantly send this reply.")
         await show_menu(event.chat_id, user_id)
         
     elif state == "WAITING_REMOVE_BUSINESS_KEYWORD":
@@ -981,7 +1023,14 @@ async def callback_handler(event):
     elif cb_data == "add_business_keyword":
         data["login_state"] = "WAITING_BUSINESS_KEYWORD"
         save_state()
-        await event.respond("Send me the KEYWORD you want the bot to detect (e.g., 'price' or 'help'):")
+        await event.respond(
+            "Send me the **KEYWORD** you want the bot to detect.\n\n"
+            "**Bulk Adding Options:**\n"
+            "• To map multiple keywords to ONE reply, send them separated by commas: `price, cost, fee`\n"
+            "• To map multiple keywords to DIFFERENT replies, use the format `keyword = reply` on new lines:\n"
+            "`price = The price is $50`\n"
+            "`hello = Hi there!`"
+        )
         
     elif cb_data == "remove_business_keyword":
         keyword_replies = data.get("business_keyword_replies", {})
