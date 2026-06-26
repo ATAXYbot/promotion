@@ -1915,7 +1915,6 @@ async def handle_ping(request):
 # ==========================================
 BUSINESS_CONN_CACHE = {}
 
-@bot_client.on(events.Raw(types.UpdateBotNewBusinessMessage))
 import re
 def get_utf16_length(s):
     return len(s.encode('utf-16-le')) // 2
@@ -2003,6 +2002,7 @@ def rebuild_entities(reply_obj):
             
     return text, rebuilt
 
+@bot_client.on(events.Raw(types.UpdateBotNewBusinessMessage))
 async def business_message_handler(event):
     conn_id = event.connection_id
     msg = getattr(event, 'message', None)
