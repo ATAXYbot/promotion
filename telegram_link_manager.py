@@ -1847,7 +1847,17 @@ async def business_message_handler(event):
         try:
             logger.info("Fetching business connection info from Telegram...")
             conn_info = await bot_client(GetBotBusinessConnectionRequest(connection_id=conn_id))
-            user_id = conn_info.user_id
+            
+            # conn_info is an Updates object containing the connection update
+            for u in getattr(conn_info, 'updates', []):
+                if hasattr(u, 'connection') and hasattr(u.connection, 'user_id'):
+                    user_id = u.connection.user_id
+                    break
+                    
+            if not user_id:
+                logger.error(f"Could not find user_id in business connection updates for {conn_id}")
+                return
+                
             BUSINESS_CONN_CACHE[conn_id] = user_id
         except Exception as e:
             logger.error(f"Failed to fetch business connection: {e}")
