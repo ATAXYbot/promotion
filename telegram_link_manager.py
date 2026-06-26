@@ -1826,17 +1826,26 @@ BUSINESS_CONN_CACHE = {}
 async def business_message_handler(event):
     conn_id = event.connection_id
     msg = getattr(event, 'message', None)
+    
+    logger.info(f"Received Business Msg! conn_id: {conn_id}, msg: {msg is not None}")
+    
     if not msg:
         return
         
+    peer = getattr(msg, 'peer_id', None)
+    from_id = getattr(msg, 'from_id', None)
+    logger.info(f"Business Msg Details - peer: {peer}, from_id: {from_id}, out: {getattr(msg, 'out', False)}")
+        
     # We only auto-reply to private DMs, not groups
-    if not isinstance(getattr(msg, 'peer_id', None), types.PeerUser):
+    if not isinstance(peer, types.PeerUser):
+        logger.info("Not a PeerUser, ignoring.")
         return
         
     # Find which user owns this connection
     user_id = BUSINESS_CONN_CACHE.get(conn_id)
     if not user_id:
         try:
+            logger.info("Fetching business connection info from Telegram...")
             conn_info = await bot_client(GetBotBusinessConnectionRequest(connection_id=conn_id))
             user_id = conn_info.user_id
             BUSINESS_CONN_CACHE[conn_id] = user_id
@@ -1846,13 +1855,26 @@ async def business_message_handler(event):
             
     data = get_user_data(user_id)
     reply_text = data.get("business_auto_reply")
+    logger.info(f"Business Owner ID: {user_id}, Reply Text Set: {reply_text is not None}")
     if not reply_text:
         return
         
     # Check 24-hour anti-spam
-    sender_id = msg.peer_id.user_id
+    # In business messages, the sender is usually msg.from_id.user_id if present, else msg.peer_id.user_id
+    sender_id = None
+    if isinstance(from_id, types.PeerUser):
+        sender_id = from_id.user_id
+    elif isinstance(peer, types.PeerUser):
+        sender_id = peer.user_id
+        
+    logger.info(f"Determined Sender ID: {sender_id}")
+    
+    if not sender_id:
+        return
+        
     # Don't reply to yourself!
-    if sender_id == user_id:
+    if getattr(msg, 'out', False) or sender_id == user_id:
+        logger.info("Ignoring outgoing message or message sent to self.")
         return
         
     now = time.time()
@@ -1864,14 +1886,16 @@ async def business_message_handler(event):
         del replied_cache[k]
         
     if str(sender_id) in replied_cache:
+        logger.info(f"Already replied to {sender_id} within 24h. Ignoring.")
         return # Already replied to this person today
         
     try:
+        logger.info(f"Sending business reply to peer {peer} for connection {conn_id}...")
         # Send the auto reply natively through MTProto
         await bot_client(InvokeWithBusinessConnectionRequest(
             connection_id=conn_id,
             query=SendMessageRequest(
-                peer=msg.peer_id,
+                peer=peer,
                 message=reply_text,
                 random_id=random.randint(-2**63, 2**63 - 1)
             )
