@@ -1904,12 +1904,19 @@ async def business_message_handler(event):
         return # Already replied to this person today
         
     try:
-        logger.info(f"Sending business reply to peer {peer} for connection {conn_id}...")
+        logger.info(f"Sending business reply to sender {sender_id} for connection {conn_id}...")
+        
+        try:
+            input_peer = await bot_client.get_input_entity(sender_id)
+        except ValueError:
+            logger.error(f"Could not resolve InputPeer for sender {sender_id}")
+            return
+            
         # Send the auto reply natively through MTProto
         await bot_client(InvokeWithBusinessConnectionRequest(
             connection_id=conn_id,
             query=SendMessageRequest(
-                peer=peer,
+                peer=input_peer,
                 message=reply_text,
                 random_id=random.randint(-2**63, 2**63 - 1)
             )
