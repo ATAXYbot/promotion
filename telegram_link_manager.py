@@ -1314,7 +1314,8 @@ async def callback_handler(event):
         msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
         msg += f"📊 **ANALYTICS**\n"
         msg += f"**Health Grade:** {grade}\n"
-        msg += f"**Checks:** `{perf['checks']}` | **Joins:** `{perf['joins']}`\n"
+        msg += f"**Total Lifetime Checks:** `{perf.get('total_checks', int(perf['checks']))}` | **Total Joins:** `{perf.get('total_joins', int(perf['joins']))}`\n"
+        msg += f"*(AI Rolling Window: {int(perf['checks'])} checks, {int(perf['joins'])} joins)*\n"
         
         if active_hours:
             msg += f"**Schedule (IST):** 🕒 {active_hours['start']:02d}:00 - {active_hours['end']:02d}:00\n"
@@ -1644,9 +1645,22 @@ async def runner_engine(user_id: int, chat_id: int):
         try:
             invite_info = await user_client(CheckChatInviteRequest(hash_str))
             
-            # Record analytics: Absolute Counters
+            # Record analytics: Intelligent Decay (Rolling Window)
+            # Keeps the grade dynamically shifting based on RECENT traffic
             perf = data.setdefault("link_performance", {}).setdefault(hash_str, {"checks": 0, "joins": 0})
-            perf["checks"] = int(perf.get("checks", 0)) + 1
+            
+            # Absolute non-decaying tracking for user display
+            perf["total_checks"] = perf.get("total_checks", int(perf.get("checks", 0))) + 1
+            
+            current_checks = float(perf.get("checks", 0))
+            current_joins = float(perf.get("joins", 0))
+            
+            if current_checks >= 50:
+                current_checks *= 0.8
+                current_joins *= 0.8
+                
+            perf["checks"] = round(current_checks + 1, 2)
+            perf["joins"] = round(current_joins, 2)
             
             # Extract participants count
             if hasattr(invite_info, 'participants_count'):
@@ -1664,7 +1678,9 @@ async def runner_engine(user_id: int, chat_id: int):
             
             recent_ids = []
             new_unique_users = 0
+            provided_participants = False
             if hasattr(invite_info, 'participants') and invite_info.participants:
+                provided_participants = True
                 seen_users = data.get("link_seen_users", {}).get(hash_str, [])
                 global_blacklist = data.setdefault("global_blacklist", [])
                 global_seen = data.setdefault("global_seen_users", {})
@@ -1703,13 +1719,17 @@ async def runner_engine(user_id: int, chat_id: int):
                     diff = participants_count - last_count
                     
                     if diff >= 10:
-                        is_active_mode = True
-                        data.setdefault("high_traffic_links", {})[hash_str] = time.time()
-                        await send_alert(user_id, chat_id, f"🔥 **Active Mode (High Traffic):** {diff} new users joined `{link}`. Engaging!", priority="HIGH")
-                    elif new_unique_users > 0 or (diff >= 1 and len(recent_ids) == 0):
+                        if provided_participants and new_unique_users == 0:
+                            is_active_mode = False
+                            await send_alert(user_id, chat_id, f"📉 **Passive Mode (Spam Filter):** Ignored {diff} joins in `{link}` because they were all repeat spammers.", priority="LOW")
+                        else:
+                            is_active_mode = True
+                            data.setdefault("high_traffic_links", {})[hash_str] = time.time()
+                            await send_alert(user_id, chat_id, f"🔥 **Active Mode (High Traffic):** {diff} new users joined `{link}`. Engaging!", priority="HIGH")
+                    elif new_unique_users > 0 or (diff >= 1 and not provided_participants):
                         if is_high_traffic:
                             is_active_mode = False
-                            await send_alert(user_id, chat_id, f"⏳ **Passive Mode (Throttling):** New users detected in `{link}`, waiting for 10 users because group is High Traffic.")
+                            await send_alert(user_id, chat_id, f"⏳ **Passive Mode (Throttling):** Genuine new users detected in `{link}`, waiting for 10 users because group is High Traffic.")
                         else:
                             is_active_mode = True
                             await send_alert(user_id, chat_id, f"🔥 **Active Mode:** Genuine new users detected in `{link}`. Engaging!")
@@ -1762,7 +1782,11 @@ async def runner_engine(user_id: int, chat_id: int):
                 
                 # Record analytics: 1 Join
                 perf = data.setdefault("link_performance", {}).setdefault(hash_str, {"checks": 0, "joins": 0})
-                perf["joins"] = int(perf.get("joins", 0)) + 1
+                
+                # Absolute non-decaying tracking for user display
+                perf["total_joins"] = perf.get("total_joins", int(perf.get("joins", 0))) + 1
+                
+                perf["joins"] = round(float(perf.get("joins", 0)) + 1, 2)
                 
                 # RESURRECTION FROM HIBERNATION
                 if hash_str in data.get("hibernating_links", []):
@@ -1771,10 +1795,16 @@ async def runner_engine(user_id: int, chat_id: int):
                     perf["joins"] = 0
                     await send_alert(user_id, chat_id, f"🎉 **RESURRECTED:** `{link}` was dead but just got traffic! Removing from Hibernation and pushing to Active Queue!", priority="HIGH")
                     
-                # Peak Hour AI Recording
+                # Peak Hour AI Recording & Intelligent Decay
                 current_hour = str(datetime.now(timezone(timedelta(hours=5, minutes=30))).hour)
-                data.setdefault("hour_activity_log", {}).setdefault(hash_str, {})
-                data["hour_activity_log"][hash_str][current_hour] = data["hour_activity_log"][hash_str].get(current_hour, 0) + 1
+                hour_log = data.setdefault("hour_activity_log", {}).setdefault(hash_str, {})
+                
+                # If total joins recorded exceed 50, decay all hours by 10% to let new patterns take over
+                if sum(hour_log.values()) > 50:
+                    for h in hour_log:
+                        hour_log[h] = round(float(hour_log[h]) * 0.9, 2)
+                        
+                hour_log[current_hour] = round(float(hour_log.get(current_hour, 0)) + 1, 2)
                 
                 save_state()
                 
@@ -1875,11 +1905,13 @@ async def runner_engine(user_id: int, chat_id: int):
         current_hour_str = str(now_ist.hour)
         activity_log = data.get("hour_activity_log", {}).get(hash_str, {})
         total_joins_for_link = sum(activity_log.values())
+        is_peak_hour = False
         if total_joins_for_link >= 5: # Need enough data to make AI predictions
             hour_joins = activity_log.get(current_hour_str, 0)
             ratio = hour_joins / total_joins_for_link
             if ratio >= 0.2: # Peak hour (>20% of traffic)
-                grade_multiplier *= 0.6 # Speed up drastically
+                is_peak_hour = True
+                grade_multiplier *= 0.4 # Speed up massively
             elif ratio == 0: # Dead hour
                 grade_multiplier *= 1.3 # Slow down
                 
@@ -1917,17 +1949,26 @@ async def runner_engine(user_id: int, chat_id: int):
             elif "📊" in grade: # C Slow
                 next_delay = random.randint(1800, 2700) # 30-45 mins
                 traffic_str = f"📊 Slow (Saving API Limits)"
-            elif "📉" in grade: # D Dead/Spam
-                next_delay = random.randint(7200, 14400) # 2-4 hours! Anti-Ban Protection
-                traffic_str = f"📉 Dead Group (Anti-Ban Throttling)"
+            elif "📉" in grade or "🥱" in grade: # D or E Dead/Spam
+                next_delay = random.randint(3600, 10800) # 1-3 hours! Anti-Ban Protection
+                traffic_str = f"{grade} Dead Group (Anti-Ban Throttling)"
             else: # 🆕 Init
                 next_delay = random.randint(300, 600) # 5-10 mins (Learn quickly)
                 traffic_str = f"🆕 Scanning Mode"
+                
+            # APPLY AI MULTIPLIERS
+            next_delay = int(next_delay * grade_multiplier)
+            
+            if is_peak_hour:
+                # Never sleep more than 15 mins during a historical rush hour!
+                next_delay = min(next_delay, 900)
+                traffic_str += " ⚡ (Rush Hour AI Override)"
                 
             # Override for absolute Viral spikes (diff >= 10)
             if is_active_mode and (is_high_traffic or diff >= 10):
                 next_delay = random.randint(60, 180) # 1-3 mins MAX Speed
                 traffic_str = "🚀 VIRAL SPIKE DETECTED (Max Speed)"
+
                 
         # Ensure session string is always synced with any internal Telethon updates
         user_client = data.get("client")
