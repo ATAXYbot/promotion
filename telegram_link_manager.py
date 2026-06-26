@@ -20,7 +20,7 @@ from datetime import datetime, timezone, timedelta
 from motor.motor_asyncio import AsyncIOMotorClient
 from telethon.sessions import StringSession
 
-from telethon import TelegramClient, events, Button
+from telethon import TelegramClient, events, Button, types
 from telethon.errors import (
     FloodWaitError, UserAlreadyParticipantError, SessionPasswordNeededError,
     PhoneNumberInvalidError, PhoneCodeInvalidError, PhoneCodeExpiredError
