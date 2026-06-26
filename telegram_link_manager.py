@@ -384,8 +384,13 @@ async def show_menu(chat_id: int, user_id: int, event=None):
             save_state()
             client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, **kwargs)
             await client.connect()
+            try: await client.get_me() # Sync AuthKey globally on Render IP change
+            except: pass
+            
             if await client.is_user_authorized():
                 data["client"] = client
+            else:
+                await client.disconnect()
                 
     if data["client"] is None or not await data["client"].is_user_authorized():
         welcome_text = (
@@ -1603,10 +1608,14 @@ async def runner_engine(user_id: int, chat_id: int):
                 await user_client.delete_dialog(joined_chat_id)
                 
             except UserAlreadyParticipantError:
-                await send_alert(user_id, chat_id, f"ℹ️ Already a participant of `{link}`. Removing from queue.", priority="LOW")
-                if link in data["queue"]:
-                    data["queue"].remove(link)
-                save_state()
+                await send_alert(user_id, chat_id, f"🧹 Already in `{link}` (likely due to a previous crash). Cleaning up and keeping in queue.", priority="LOW")
+                try:
+                    # Resolve the chat entity and leave to fix the zombie state
+                    invite_info = await user_client(CheckChatInviteRequest(hash_str))
+                    if hasattr(invite_info, 'chat'):
+                        await user_client.delete_dialog(invite_info.chat.id)
+                except Exception:
+                    pass
                 continue
                 
             except FloodWaitError as e:
