@@ -25,9 +25,11 @@ from telethon.errors import (
     FloodWaitError, UserAlreadyParticipantError, SessionPasswordNeededError,
     PhoneNumberInvalidError, PhoneCodeInvalidError, PhoneCodeExpiredError
 )
-from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest, SendReactionRequest
+from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest, SendReactionRequest, SendMessageRequest
 from telethon.tl.types import BotCommand, BotCommandScopeDefault, ChatInvite, ChatInviteAlready, ReactionEmoji
 from telethon.tl.functions.bots import SetBotCommandsRequest
+from telethon.tl.functions.account import GetBotBusinessConnectionRequest
+from telethon.tl.functions import InvokeWithBusinessConnectionRequest
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -232,7 +234,9 @@ async def _save_state_async():
             "engine_uptime_start": state.get("engine_uptime_start", time.time()),
             "user_proxies": state.get("user_proxies", []),
             "hibernating_links": state.get("hibernating_links", []),
-            "first_login_time": state.get("first_login_time", 0)
+            "first_login_time": state.get("first_login_time", 0),
+            "business_auto_reply": state.get("business_auto_reply", None),
+            "business_replied_users": state.get("business_replied_users", {})
         }
         state_to_save[str(user_id)] = doc
         
@@ -297,7 +301,9 @@ def get_user_data(user_id):
             "user_proxies": [],
             "hibernating_links": [],
             "first_login_time": 0,
-            "spoofed_device": None
+            "spoofed_device": None,
+            "business_auto_reply": None,
+            "business_replied_users": {}
         }
     return user_data[user_id]
 
@@ -407,7 +413,7 @@ async def show_menu(chat_id: int, user_id: int, event=None):
         [Button.inline("▶️ START ENGINE", b"start_loop"), Button.inline("⏸️ STOP ENGINE", b"stop_loop")],
         [Button.inline("➕ Add New Link", b"add_link"), Button.inline("📊 Live Queue", b"show_queue")],
         [Button.inline("📝 Live Logs", b"show_live_log"), Button.inline("⚙️ Settings & Proxy", b"settings_menu")],
-        [Button.inline("🩺 Live Diagnostics", b"show_diagnostics")],
+        [Button.inline("🤖 Chat Automation", b"business_menu"), Button.inline("🩺 Live Diagnostics", b"show_diagnostics")],
         [Button.inline("🚪 Secure Logout", b"logout")]
     ]
     status = "🟢 ACTIVE (Running)" if data["loop_active"] else "🔴 PAUSED (Stopped)"
@@ -652,6 +658,13 @@ async def message_handler(event):
         save_state()
         await show_menu(event.chat_id, user_id)
         
+    elif state == "WAITING_BUSINESS_REPLY":
+        data["business_auto_reply"] = event.text.strip()
+        data["login_state"] = None
+        save_state()
+        await event.respond("✅ **Auto-Reply text saved and enabled!**\nMake sure to connect this bot in your Telegram Settings -> Telegram Business -> Chat Automation.")
+        await show_menu(event.chat_id, user_id)
+        
     elif state == "WAITING_EDIT_LINK":
         link = event.text.strip()
         idx = data.get("editing_link")
@@ -859,6 +872,41 @@ async def callback_handler(event):
         data["login_state"] = "WAITING_REMOVE_LINK"
         save_state()
         await event.respond(msg)
+        
+    elif cb_data == "business_menu":
+        reply_txt = data.get("business_auto_reply")
+        status = "🟢 ON" if reply_txt else "🔴 OFF"
+        msg = f"🤖 **CHAT AUTOMATION (Business)**\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"**Auto-Responder:** `{status}`\n\n"
+        if reply_txt:
+            msg += f"**Current Reply:**\n`{reply_txt}`\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"*Connect this bot to your Personal Account via Telegram Settings -> Telegram Business -> Chat Automation to auto-reply to DMs!*\n"
+        
+        kb = [[Button.inline("📝 Set Reply Text", b"set_business_reply")]]
+        if reply_txt:
+            kb.append([Button.inline("❌ Turn OFF", b"turn_off_business")])
+        kb.append([Button.inline("🔙 Back to Dashboard", b"back_to_menu")])
+        await event.edit(msg, buttons=kb)
+        
+    elif cb_data == "set_business_reply":
+        data["login_state"] = "WAITING_BUSINESS_REPLY"
+        save_state()
+        await event.respond("Send me the exact text you want the bot to auto-reply to users with:")
+        
+    elif cb_data == "turn_off_business":
+        data["business_auto_reply"] = None
+        save_state()
+        await event.answer("Auto-Responder Disabled", alert=True)
+        # Re-render business menu
+        class DummyEventBusiness:
+            data = b"business_menu"
+            sender_id = user_id
+            chat_id = event.chat_id
+            async def edit(self, *args, **kwargs): pass
+            async def answer(self, *args, **kwargs): pass
+        await callback_handler(DummyEventBusiness())
         
     elif cb_data == "show_diagnostics":
         process_uptime = int(time.time() - PHYSICAL_BOOT_TIME)
@@ -1758,6 +1806,73 @@ async def runner_engine(user_id: int, chat_id: int):
 
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
+
+# ==========================================
+# TELEGRAM BUSINESS AUTO-RESPONDER
+# ==========================================
+BUSINESS_CONN_CACHE = {}
+
+@bot_client.on(events.Raw(types.UpdateBotNewBusinessMessage))
+async def business_message_handler(event):
+    conn_id = event.connection_id
+    msg = getattr(event, 'message', None)
+    if not msg:
+        return
+        
+    # We only auto-reply to private DMs, not groups
+    if not isinstance(getattr(msg, 'peer_id', None), types.PeerUser):
+        return
+        
+    # Find which user owns this connection
+    user_id = BUSINESS_CONN_CACHE.get(conn_id)
+    if not user_id:
+        try:
+            conn_info = await bot_client(GetBotBusinessConnectionRequest(connection_id=conn_id))
+            user_id = conn_info.user_id
+            BUSINESS_CONN_CACHE[conn_id] = user_id
+        except Exception as e:
+            logger.error(f"Failed to fetch business connection: {e}")
+            return
+            
+    data = get_user_data(user_id)
+    reply_text = data.get("business_auto_reply")
+    if not reply_text:
+        return
+        
+    # Check 24-hour anti-spam
+    sender_id = msg.peer_id.user_id
+    # Don't reply to yourself!
+    if sender_id == user_id:
+        return
+        
+    now = time.time()
+    
+    # Clean up old anti-spam entries (older than 24h)
+    replied_cache = data.setdefault("business_replied_users", {})
+    keys_to_delete = [k for k, v in replied_cache.items() if now - v > 86400]
+    for k in keys_to_delete:
+        del replied_cache[k]
+        
+    if str(sender_id) in replied_cache:
+        return # Already replied to this person today
+        
+    try:
+        # Send the auto reply natively through MTProto
+        await bot_client(InvokeWithBusinessConnectionRequest(
+            connection_id=conn_id,
+            query=SendMessageRequest(
+                peer=msg.peer_id,
+                message=reply_text,
+                random_id=random.randint(-2**63, 2**63 - 1)
+            )
+        ))
+        # Mark as replied
+        replied_cache[str(sender_id)] = now
+        instant_save_state() # Save cache
+        
+        logger.info(f"Sent Business Auto-Reply for user {user_id} to sender {sender_id}")
+    except Exception as e:
+        logger.error(f"Failed to send business auto-reply: {e}")
 
 async def start_web_server():
     try:
