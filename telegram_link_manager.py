@@ -123,7 +123,8 @@ async def load_state():
                     "hibernating_links": doc.get("hibernating_links", []),
                     "first_login_time": doc.get("first_login_time", 0),
                     "business_auto_reply": doc.get("business_auto_reply", None),
-                    "business_replied_users": doc.get("business_replied_users", {})
+                    "business_replied_users": doc.get("business_replied_users", {}),
+                    "business_keyword_replies": doc.get("business_keyword_replies", {})
                 }
             loaded_from_db = True
             logger.info("State successfully loaded from MongoDB.")
@@ -182,7 +183,8 @@ async def load_state():
                         "hibernating_links": state.get("hibernating_links", []),
                         "first_login_time": state.get("first_login_time", 0),
                         "business_auto_reply": state.get("business_auto_reply", None),
-                        "business_replied_users": state.get("business_replied_users", {})
+                        "business_replied_users": state.get("business_replied_users", {}),
+                        "business_keyword_replies": state.get("business_keyword_replies", {})
                     }
         except Exception as e:
             logger.error(f"Error loading state from local file: {e}")
@@ -240,7 +242,8 @@ async def _save_state_async():
             "hibernating_links": state.get("hibernating_links", []),
             "first_login_time": state.get("first_login_time", 0),
             "business_auto_reply": state.get("business_auto_reply", None),
-            "business_replied_users": state.get("business_replied_users", {})
+            "business_replied_users": state.get("business_replied_users", {}),
+            "business_keyword_replies": state.get("business_keyword_replies", {})
         }
         state_to_save[str(user_id)] = doc
         
@@ -307,7 +310,8 @@ def get_user_data(user_id):
             "first_login_time": 0,
             "spoofed_device": None,
             "business_auto_reply": None,
-            "business_replied_users": {}
+            "business_replied_users": {},
+            "business_keyword_replies": {}
         }
     return user_data[user_id]
 
@@ -674,6 +678,41 @@ async def message_handler(event):
         await event.respond(f"✅ **Auto-Reply text saved and enabled for THIS account ({user_id})!**\nMake sure you are connecting the bot in the Telegram Settings of THIS exact account, otherwise it won't work.")
         await show_menu(event.chat_id, user_id)
         
+    elif state == "WAITING_BUSINESS_KEYWORD":
+        kw = event.text.strip().lower()
+        if not kw:
+            await event.respond("❌ Invalid keyword.")
+        else:
+            data["temp_keyword"] = kw
+            data["login_state"] = "WAITING_BUSINESS_KEYWORD_REPLY"
+            save_state()
+            await event.respond(f"✅ Keyword `{kw}` received.\nNow, send me the exact reply you want the bot to send when someone says this keyword:")
+            return # Don't show menu yet
+            
+    elif state == "WAITING_BUSINESS_KEYWORD_REPLY":
+        kw = data.get("temp_keyword")
+        if kw:
+            reply_txt = event.text.strip()
+            data.setdefault("business_keyword_replies", {})[kw] = reply_txt
+            data.pop("temp_keyword", None)
+            data["login_state"] = None
+            instant_save_state()
+            await event.respond(f"✅ **Keyword Reply Saved!**\nWhenever someone says `{kw}`, the bot will instantly send this reply.")
+        await show_menu(event.chat_id, user_id)
+        
+    elif state == "WAITING_REMOVE_BUSINESS_KEYWORD":
+        kw = event.text.strip().lower()
+        kws = data.get("business_keyword_replies", {})
+        if kw in kws:
+            del kws[kw]
+            instant_save_state()
+            await event.respond(f"✅ Removed keyword `{kw}`.")
+        else:
+            await event.respond("❌ Keyword not found.")
+        data["login_state"] = None
+        save_state()
+        await show_menu(event.chat_id, user_id)
+        
     elif state == "WAITING_EDIT_LINK":
         link = event.text.strip()
         idx = data.get("editing_link")
@@ -861,7 +900,7 @@ async def callback_handler(event):
                 save_state()
                 
     cb_data = event.data.decode('utf-8')
-    unauthenticated_callbacks = ["business_menu", "set_business_reply", "turn_off_business", "back_to_menu", "login_prompt"]
+    unauthenticated_callbacks = ["business_menu", "set_business_reply", "turn_off_business", "back_to_menu", "login_prompt", "add_business_keyword", "remove_business_keyword"]
     
     if data["client"] is None and cb_data not in unauthenticated_callbacks:
         await event.answer("You are not logged in! Send /login", alert=True)
@@ -889,28 +928,64 @@ async def callback_handler(event):
         
     elif cb_data == "business_menu":
         reply_txt = data.get("business_auto_reply")
-        status = "🟢 ON" if reply_txt else "🔴 OFF"
+        keyword_replies = data.get("business_keyword_replies", {})
+        
+        status = "🟢 ON" if (reply_txt or keyword_replies) else "🔴 OFF"
         msg = f"🤖 **CHAT AUTOMATION (Business)**\n"
         msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
         msg += f"**Auto-Responder:** `{status}`\n\n"
+        
         if reply_txt:
-            msg += f"**Current Reply:**\n`{reply_txt}`\n"
+            msg += f"**Default 24H Reply:**\n`{reply_txt}`\n\n"
+            
+        if keyword_replies:
+            msg += f"**Keyword Replies ({len(keyword_replies)}):**\n"
+            for kw in keyword_replies:
+                msg += f"• `{kw}`\n"
+            msg += "\n"
+                
         msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
         msg += f"*Connect this bot to your Personal Account via Telegram Settings -> Telegram Business -> Chat Automation to auto-reply to DMs!*\n"
         
-        kb = [[Button.inline("📝 Set Reply Text", b"set_business_reply")]]
-        if reply_txt:
-            kb.append([Button.inline("❌ Turn OFF", b"turn_off_business")])
+        kb = [[Button.inline("📝 Set Default 24H Reply", b"set_business_reply")]]
+        kb.append([Button.inline("➕ Add Keyword Reply", b"add_business_keyword")])
+        
+        if keyword_replies:
+            kb.append([Button.inline("➖ Remove Keyword", b"remove_business_keyword")])
+            
+        if reply_txt or keyword_replies:
+            kb.append([Button.inline("❌ Turn OFF All", b"turn_off_business")])
+            
         kb.append([Button.inline("🔙 Back to Dashboard", b"back_to_menu")])
         await event.edit(msg, buttons=kb)
         
     elif cb_data == "set_business_reply":
         data["login_state"] = "WAITING_BUSINESS_REPLY"
         save_state()
-        await event.respond("Send me the exact text you want the bot to auto-reply to users with:")
+        await event.respond("Send me the exact text you want the bot to auto-reply to users with as a default 24-hour welcome message:")
+        
+    elif cb_data == "add_business_keyword":
+        data["login_state"] = "WAITING_BUSINESS_KEYWORD"
+        save_state()
+        await event.respond("Send me the KEYWORD you want the bot to detect (e.g., 'price' or 'help'):")
+        
+    elif cb_data == "remove_business_keyword":
+        keyword_replies = data.get("business_keyword_replies", {})
+        if not keyword_replies:
+            await event.answer("No keywords to remove.", alert=True)
+            return
+            
+        msg = "Send me the exact KEYWORD you want to remove:\n\n"
+        for kw in keyword_replies:
+            msg += f"• `{kw}`\n"
+            
+        data["login_state"] = "WAITING_REMOVE_BUSINESS_KEYWORD"
+        save_state()
+        await event.respond(msg)
         
     elif cb_data == "turn_off_business":
         data["business_auto_reply"] = None
+        data["business_keyword_replies"] = {}
         save_state()
         await event.answer("Auto-Responder Disabled", alert=True)
         # Re-render business menu
@@ -1868,12 +1943,7 @@ async def business_message_handler(event):
             return
             
     data = get_user_data(user_id)
-    reply_text = data.get("business_auto_reply")
-    logger.info(f"Business Owner ID: {user_id}, Reply Text Set: {reply_text is not None}")
-    if not reply_text:
-        return
-        
-    # Check 24-hour anti-spam
+    
     # In business messages, the sender is usually msg.from_id.user_id if present, else msg.peer_id.user_id
     sender_id = None
     if isinstance(from_id, types.PeerUser):
@@ -1882,7 +1952,6 @@ async def business_message_handler(event):
         sender_id = peer.user_id
         
     logger.info(f"Determined Sender ID: {sender_id}")
-    
     if not sender_id:
         return
         
@@ -1893,6 +1962,50 @@ async def business_message_handler(event):
         
     now = time.time()
     
+    # -----------------------------
+    # 1. KEYWORD REPLY CHECK
+    # -----------------------------
+    keyword_replies = data.get("business_keyword_replies", {})
+    matched_reply = None
+    msg_text = getattr(msg, 'message', '').lower()
+    
+    for kw, kw_reply in keyword_replies.items():
+        # Check if keyword exists as a whole word, or just substring. Substring is simpler for now.
+        if kw.lower() in msg_text:
+            matched_reply = kw_reply
+            break
+            
+    if matched_reply:
+        # Keyword replies bypass the 24-hour limit!
+        # But we enforce a tiny 5-second anti-loop cooldown
+        kw_cache = data.setdefault("business_kw_throttle", {})
+        if now - kw_cache.get(str(sender_id), 0) < 5:
+            return # Too fast!
+            
+        try:
+            input_peer = await bot_client.get_input_entity(sender_id)
+            await bot_client(InvokeWithBusinessConnectionRequest(
+                connection_id=conn_id,
+                query=SendMessageRequest(
+                    peer=input_peer,
+                    message=matched_reply,
+                    random_id=random.randint(-2**63, 2**63 - 1)
+                )
+            ))
+            kw_cache[str(sender_id)] = now
+            logger.info(f"Sent Keyword Auto-Reply to sender {sender_id}")
+        except Exception as e:
+            logger.error(f"Failed to send keyword auto-reply: {e}")
+        return
+
+    # -----------------------------
+    # 2. DEFAULT 24-HOUR REPLY CHECK
+    # -----------------------------
+    reply_text = data.get("business_auto_reply")
+    logger.info(f"Business Owner ID: {user_id}, Reply Text Set: {reply_text is not None}")
+    if not reply_text:
+        return
+        
     # Clean up old anti-spam entries (older than 24h)
     replied_cache = data.setdefault("business_replied_users", {})
     keys_to_delete = [k for k, v in replied_cache.items() if now - v > 86400]
