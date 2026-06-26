@@ -398,54 +398,59 @@ async def show_menu(chat_id: int, user_id: int, event=None):
             else:
                 await client.disconnect()
                 
-    if data["client"] is None or not await data["client"].is_user_authorized():
-        welcome_text = (
-            "👋 **Welcome to the Automated Telegram Link Manager!**\n\n"
-            "To get started, you need to connect your Telegram account. Simply send `/login` to begin."
-        )
-        if event and hasattr(event, 'edit'):
-            await event.edit(welcome_text)
-        else:
-            await bot_client.send_message(chat_id, welcome_text)
-        return
-
-    keyboard = [
-        [Button.inline("▶️ START ENGINE", b"start_loop"), Button.inline("⏸️ STOP ENGINE", b"stop_loop")],
-        [Button.inline("➕ Add New Link", b"add_link"), Button.inline("📊 Live Queue", b"show_queue")],
-        [Button.inline("📝 Live Logs", b"show_live_log"), Button.inline("⚙️ Settings & Proxy", b"settings_menu")],
-        [Button.inline("🤖 Chat Automation", b"business_menu"), Button.inline("🩺 Live Diagnostics", b"show_diagnostics")],
-        [Button.inline("🚪 Secure Logout", b"logout")]
-    ]
-    status = "🟢 ACTIVE (Running)" if data["loop_active"] else "🔴 PAUSED (Stopped)"
-    
-    now = time.time()
-    data["daily_joins"] = [ts for ts in data["daily_joins"] if now - ts < 86400]
-    
-    # Calculate Session Security / Warmup Status
-    warmup_status = "🟢 Secured (Full Speed)"
-    if "first_login_time" in data and data["first_login_time"] > 0:
-        time_elapsed = now - data["first_login_time"]
-        if time_elapsed < (72 * 3600):
-            progress = int((time_elapsed / (72 * 3600)) * 100)
-            warmup_status = f"🟡 Warmup Mode ({progress}%)"
-            
-    uptime_str = "0h 0m"
-    if data["loop_active"]:
-        up_sec = int(now - data.get("engine_uptime_start", now))
-        uptime_str = f"{up_sec // 3600}h {(up_sec % 3600) // 60}m"
+    authorized = False
+    if data["client"] is not None and await data["client"].is_user_authorized():
+        authorized = True
         
-    text = (
-        f"🖥️ **MAIN CONTROL PANEL**\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"**Engine State:** {status}\n"
-        f"**Uptime:** {uptime_str}\n"
-        f"**Session Trust:** {warmup_status}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📈 **PERFORMANCE (24H)**\n"
-        f"**Links in Queue:** `{len(data['queue'])}`\n"
-        f"**Successful Joins:** `{len(data['daily_joins'])}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━"
-    )
+    if authorized:
+        keyboard = [
+            [Button.inline("▶️ START ENGINE", b"start_loop"), Button.inline("⏸️ STOP ENGINE", b"stop_loop")],
+            [Button.inline("➕ Add New Link", b"add_link"), Button.inline("📊 Live Queue", b"show_queue")],
+            [Button.inline("📝 Live Logs", b"show_live_log"), Button.inline("⚙️ Settings & Proxy", b"settings_menu")],
+            [Button.inline("🤖 Chat Automation", b"business_menu"), Button.inline("🩺 Live Diagnostics", b"show_diagnostics")],
+            [Button.inline("🚪 Secure Logout", b"logout")]
+        ]
+        status = "🟢 ACTIVE (Running)" if data["loop_active"] else "🔴 PAUSED (Stopped)"
+        
+        now = time.time()
+        data["daily_joins"] = [ts for ts in data["daily_joins"] if now - ts < 86400]
+        
+        # Calculate Session Security / Warmup Status
+        warmup_status = "🟢 Secured (Full Speed)"
+        if "first_login_time" in data and data["first_login_time"] > 0:
+            time_elapsed = now - data["first_login_time"]
+            if time_elapsed < (72 * 3600):
+                progress = int((time_elapsed / (72 * 3600)) * 100)
+                warmup_status = f"🟡 Warmup Mode ({progress}%)"
+                
+        uptime_str = "0h 0m"
+        if data["loop_active"]:
+            up_sec = int(now - data.get("engine_uptime_start", now))
+            uptime_str = f"{up_sec // 3600}h {(up_sec % 3600) // 60}m"
+            
+        text = (
+            f"🖥️ **MAIN CONTROL PANEL**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"**Engine State:** {status}\n"
+            f"**Uptime:** {uptime_str}\n"
+            f"**Session Trust:** {warmup_status}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📈 **PERFORMANCE (24H)**\n"
+            f"**Links in Queue:** `{len(data['queue'])}`\n"
+            f"**Successful Joins:** `{len(data['daily_joins'])}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━"
+        )
+    else:
+        keyboard = [
+            [Button.inline("🔑 Login to Link Manager", b"login_prompt")],
+            [Button.inline("🤖 Chat Automation", b"business_menu")]
+        ]
+        text = (
+            "👋 **Welcome to the Automated Telegram Link Manager & Auto-Responder!**\n\n"
+            "Choose a feature below to get started.\n\n"
+            "*(Note: The Link Manager requires you to login with your personal account, while Chat Automation works instantly without logging in.)*"
+        )
+
     if event and hasattr(event, 'edit'):
         await event.edit(text, buttons=keyboard)
     else:
@@ -851,11 +856,16 @@ async def callback_handler(event):
                 await client.disconnect() # PREVENT TCP LEAK
                 save_state()
                 
-    if data["client"] is None:
+    cb_data = event.data.decode('utf-8')
+    unauthenticated_callbacks = ["business_menu", "set_business_reply", "turn_off_business", "back_to_menu", "login_prompt"]
+    
+    if data["client"] is None and cb_data not in unauthenticated_callbacks:
         await event.answer("You are not logged in! Send /login", alert=True)
         return
         
-    cb_data = event.data.decode('utf-8')
+    if cb_data == "login_prompt":
+        await event.answer("To use the Link Manager, please send the command /login in this chat.", alert=True)
+        return
     
     if cb_data == "add_link":
         data["login_state"] = "WAITING_ADD_LINK"
