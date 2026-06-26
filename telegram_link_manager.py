@@ -121,7 +121,9 @@ async def load_state():
                     "engine_uptime_start": doc.get("engine_uptime_start", time.time()),
                     "user_proxies": doc.get("user_proxies", []),
                     "hibernating_links": doc.get("hibernating_links", []),
-                    "first_login_time": doc.get("first_login_time", 0)
+                    "first_login_time": doc.get("first_login_time", 0),
+                    "business_auto_reply": doc.get("business_auto_reply", None),
+                    "business_replied_users": doc.get("business_replied_users", {})
                 }
             loaded_from_db = True
             logger.info("State successfully loaded from MongoDB.")
@@ -178,7 +180,9 @@ async def load_state():
                         "engine_uptime_start": state.get("engine_uptime_start", time.time()),
                         "user_proxies": state.get("user_proxies", []),
                         "hibernating_links": state.get("hibernating_links", []),
-                        "first_login_time": state.get("first_login_time", 0)
+                        "first_login_time": state.get("first_login_time", 0),
+                        "business_auto_reply": state.get("business_auto_reply", None),
+                        "business_replied_users": state.get("business_replied_users", {})
                     }
         except Exception as e:
             logger.error(f"Error loading state from local file: {e}")
@@ -666,8 +670,8 @@ async def message_handler(event):
     elif state == "WAITING_BUSINESS_REPLY":
         data["business_auto_reply"] = event.text.strip()
         data["login_state"] = None
-        save_state()
-        await event.respond("✅ **Auto-Reply text saved and enabled!**\nMake sure to connect this bot in your Telegram Settings -> Telegram Business -> Chat Automation.")
+        instant_save_state()
+        await event.respond(f"✅ **Auto-Reply text saved and enabled for THIS account ({user_id})!**\nMake sure you are connecting the bot in the Telegram Settings of THIS exact account, otherwise it won't work.")
         await show_menu(event.chat_id, user_id)
         
     elif state == "WAITING_EDIT_LINK":
