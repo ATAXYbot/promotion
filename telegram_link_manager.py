@@ -672,7 +672,14 @@ async def message_handler(event):
         await show_menu(event.chat_id, user_id)
         
     elif state == "WAITING_BUSINESS_REPLY":
-        data["business_auto_reply"] = event.text.strip()
+        raw_ents = event.message.entities if event.message.entities else []
+        new_text, new_ents = process_manual_emojis(event.message.message, raw_ents)
+        
+        ents_dicts = [ent.to_dict() if hasattr(ent, 'to_dict') else ent for ent in new_ents]
+        data["business_auto_reply"] = {
+            "text": new_text,
+            "entities": ents_dicts
+        }
         data["login_state"] = None
         instant_save_state()
         await event.respond(f"✅ **Auto-Reply text saved and enabled for THIS account ({user_id})!**\nMake sure you are connecting the bot in the Telegram Settings of THIS exact account, otherwise it won't work.")
@@ -692,8 +699,14 @@ async def message_handler(event):
     elif state == "WAITING_BUSINESS_KEYWORD_REPLY":
         kw = data.get("temp_keyword")
         if kw:
-            reply_txt = event.text.strip()
-            data.setdefault("business_keyword_replies", {})[kw] = reply_txt
+            raw_ents = event.message.entities if event.message.entities else []
+            new_text, new_ents = process_manual_emojis(event.message.message, raw_ents)
+            
+            ents_dicts = [ent.to_dict() if hasattr(ent, 'to_dict') else ent for ent in new_ents]
+            data.setdefault("business_keyword_replies", {})[kw] = {
+                "text": new_text,
+                "entities": ents_dicts
+            }
             data.pop("temp_keyword", None)
             data["login_state"] = None
             instant_save_state()
@@ -928,6 +941,7 @@ async def callback_handler(event):
         
     elif cb_data == "business_menu":
         reply_txt = data.get("business_auto_reply")
+        reply_disp = reply_txt.get("text") if isinstance(reply_txt, dict) else reply_txt
         keyword_replies = data.get("business_keyword_replies", {})
         
         status = "🟢 ON" if (reply_txt or keyword_replies) else "🔴 OFF"
@@ -935,8 +949,8 @@ async def callback_handler(event):
         msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
         msg += f"**Auto-Responder:** `{status}`\n\n"
         
-        if reply_txt:
-            msg += f"**Default 24H Reply:**\n`{reply_txt}`\n\n"
+        if reply_disp:
+            msg += f"**Default 24H Reply:**\n`{reply_disp}`\n\n"
             
         if keyword_replies:
             msg += f"**Keyword Replies ({len(keyword_replies)}):**\n"
@@ -1902,6 +1916,93 @@ async def handle_ping(request):
 BUSINESS_CONN_CACHE = {}
 
 @bot_client.on(events.Raw(types.UpdateBotNewBusinessMessage))
+import re
+def get_utf16_length(s):
+    return len(s.encode('utf-16-le')) // 2
+
+def process_manual_emojis(text, entities):
+    pattern = re.compile(r'\[emoji:(\d+):([^\]]+)\]')
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return text, entities
+        
+    new_text = ""
+    new_entities = []
+    
+    last_idx = 0
+    utf16_offset_old = 0
+    utf16_offset_new = 0
+    
+    shifts = []
+    
+    for match in matches:
+        doc_id = int(match.group(1))
+        base_char = match.group(2)
+        
+        prefix = text[last_idx:match.start()]
+        new_text += prefix
+        
+        utf16_offset_old += get_utf16_length(prefix)
+        utf16_offset_new += get_utf16_length(prefix)
+        
+        tag_len = get_utf16_length(match.group(0))
+        base_len = get_utf16_length(base_char)
+        
+        new_entities.append(types.MessageEntityCustomEmoji(
+            offset=utf16_offset_new,
+            length=base_len,
+            document_id=doc_id
+        ))
+        
+        new_text += base_char
+        utf16_offset_new += base_len
+        utf16_offset_old += tag_len
+        
+        shrink = tag_len - base_len
+        shifts.append((utf16_offset_old, shrink))
+        
+        last_idx = match.end()
+        
+    new_text += text[last_idx:]
+    
+    if entities:
+        for ent in entities:
+            # Shift existing entities
+            d = ent.to_dict() if hasattr(ent, 'to_dict') else ent
+            old_off = d['offset']
+            total_shrink = sum(s[1] for s in shifts if s[0] <= old_off)
+            d['offset'] -= total_shrink
+            
+            cls_name = d.get('_')
+            if cls_name:
+                cls = getattr(types, cls_name)
+                d_copy = {k:v for k,v in d.items() if k != '_'}
+                new_entities.append(cls(**d_copy))
+            else:
+                new_entities.append(ent)
+                
+    return new_text, new_entities
+
+def rebuild_entities(reply_obj):
+    if not isinstance(reply_obj, dict):
+        return reply_obj, []
+        
+    text = reply_obj.get("text", "")
+    ents = reply_obj.get("entities", [])
+    
+    rebuilt = []
+    for ent in ents:
+        try:
+            cls_name = ent.get("_")
+            if not cls_name: continue
+            cls = getattr(types, cls_name)
+            d_copy = {k:v for k,v in ent.items() if k != "_"}
+            rebuilt.append(cls(**d_copy))
+        except Exception as e:
+            logger.error(f"Failed to rebuild entity: {e}")
+            
+    return text, rebuilt
+
 async def business_message_handler(event):
     conn_id = event.connection_id
     msg = getattr(event, 'message', None)
@@ -1984,11 +2085,13 @@ async def business_message_handler(event):
             
         try:
             input_peer = await bot_client.get_input_entity(sender_id)
+            kw_text, kw_ents = rebuild_entities(matched_reply)
             await bot_client(InvokeWithBusinessConnectionRequest(
                 connection_id=conn_id,
                 query=SendMessageRequest(
                     peer=input_peer,
-                    message=matched_reply,
+                    message=kw_text,
+                    entities=kw_ents,
                     random_id=random.randint(-2**63, 2**63 - 1)
                 )
             ))
@@ -2025,12 +2128,15 @@ async def business_message_handler(event):
             logger.error(f"Could not resolve InputPeer for sender {sender_id}")
             return
             
+        def_text, def_ents = rebuild_entities(reply_text)
+            
         # Send the auto reply natively through MTProto
         await bot_client(InvokeWithBusinessConnectionRequest(
             connection_id=conn_id,
             query=SendMessageRequest(
                 peer=input_peer,
-                message=reply_text,
+                message=def_text,
+                entities=def_ents,
                 random_id=random.randint(-2**63, 2**63 - 1)
             )
         ))
