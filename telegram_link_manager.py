@@ -1741,16 +1741,32 @@ async def runner_engine(user_id: int, chat_id: int):
                             await send_alert(user_id, chat_id, f"📉 **Passive Mode:** No new users detected in `{link}`. Skipping join.", priority="LOW")
                 else:
                     # First time checking
-                    is_active_mode = True
-                    await send_alert(user_id, chat_id, f"🔥 **Active Mode:** First time checking `{link}` ({participants_count} members). Engaging!", priority="NORMAL")
+                    is_active_mode = False
+                    
+                    # Establish baseline without taking action
+                    data["link_stats"][hash_str] = participants_count
+                    if len(recent_ids) > 0:
+                        current_seen = data.get("link_seen_users", {}).get(hash_str, [])
+                        for rid in recent_ids:
+                            if rid in current_seen:
+                                current_seen.remove(rid)
+                            current_seen.append(rid)
+                        data.setdefault("link_seen_users", {})[hash_str] = current_seen[-200:]
+                    data.setdefault("link_last_action", {})[hash_str] = time.time()
+                    save_state()
+                    
+                    await send_alert(user_id, chat_id, f"👀 **Scanning Mode:** First time checking `{link}` ({participants_count} members). Establishing baseline without joining.", priority="NORMAL")
                 
                 # Update stats ONLY when we actually take action
                 if is_active_mode:
                     data["link_stats"][hash_str] = participants_count
                     if len(recent_ids) > 0:
-                        seen = set(data.get("link_seen_users", {}).get(hash_str, []))
-                        seen.update(recent_ids)
-                        data.setdefault("link_seen_users", {})[hash_str] = list(seen)[-200:]
+                        current_seen = data.get("link_seen_users", {}).get(hash_str, [])
+                        for rid in recent_ids:
+                            if rid in current_seen:
+                                current_seen.remove(rid)
+                            current_seen.append(rid)
+                        data.setdefault("link_seen_users", {})[hash_str] = current_seen[-200:]
                     data.setdefault("link_last_action", {})[hash_str] = time.time()
                     save_state()
         except Exception as e:
