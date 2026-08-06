@@ -72,6 +72,7 @@ bot_client = TelegramClient('sessions/control_bot', API_ID, API_HASH)
 # MULTI-USER STATE MANAGEMENT
 # ==========================================
 user_data = {}
+GLOBAL_LINK_SCHEDULES = {}
 STATE_FILE = "sessions/state.json"
 
 async def load_state():
@@ -1991,11 +1992,48 @@ async def runner_engine(user_id: int, chat_id: int):
         if user_client:
             data["session_string"] = user_client.session.save()
             
-        data.setdefault("link_schedule", {})[hash_str] = time.time() + next_delay
+        # ---- STAGGER LOGIC ----
+        base_target_time = time.time() + next_delay
+        actual_delay = next_delay
+        
+        N = 0
+        for uid, udata in user_data.items():
+            if udata.get("loop_active"):
+                for q_link in udata.get("queue", []):
+                    if extract_hash(q_link) == hash_str:
+                        N += 1
+                        break
+                        
+        if N > 1:
+            ideal_gap = next_delay / N
+            scheduled_times = GLOBAL_LINK_SCHEDULES.get(hash_str, [])
+            now = time.time()
+            scheduled_times = [t for t in scheduled_times if t > now]
+            
+            target_time = base_target_time
+            conflict = True
+            max_loops = 50
+            loops = 0
+            while conflict and loops < max_loops:
+                conflict = False
+                loops += 1
+                for st in scheduled_times:
+                    if abs(target_time - st) < ideal_gap:
+                        target_time = st + ideal_gap
+                        conflict = True
+                        break
+            
+            scheduled_times.append(target_time)
+            GLOBAL_LINK_SCHEDULES[hash_str] = scheduled_times
+            
+            actual_delay = int(target_time - time.time())
+        # -----------------------
+
+        data.setdefault("link_schedule", {})[hash_str] = time.time() + actual_delay
         save_state()
         
         if participants_count is not None:
-            await send_alert(user_id, chat_id, f"📅 **Rescheduled `{link}`:** ({traffic_str}) Next check in {next_delay // 60}m {next_delay % 60}s.", priority="LOW")
+            await send_alert(user_id, chat_id, f"📅 **Rescheduled `{link}`:** ({traffic_str}) Next check in {actual_delay // 60}m {actual_delay % 60}s.", priority="LOW")
 
         # Minimum global delay to prevent API Anti-Flood Warning from Peeking
         queue_size = len(data["queue"])
