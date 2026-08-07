@@ -1908,6 +1908,33 @@ async def runner_engine(user_id: int, chat_id: int):
 
         # Determine reschedule delay based on diff and active mode
         
+        # --- HIVE MIND SYNC ---
+        # Share Grades & Peak Hours across all accounts for the same link
+        best_perf = data.get("link_performance", {}).get(hash_str, {"checks": 0, "joins": 0})
+        best_ratio = (float(best_perf.get("joins", 0)) / float(best_perf.get("checks", 0))) if float(best_perf.get("checks", 0)) > 0 else 0
+        best_hour_log = data.get("hour_activity_log", {}).get(hash_str, {})
+        
+        for uid, udata in user_data.items():
+            if not udata.get("loop_active"): continue
+            
+            u_perf = udata.get("link_performance", {}).get(hash_str, {})
+            u_c = float(u_perf.get("checks", 0))
+            u_j = float(u_perf.get("joins", 0))
+            u_ratio = (u_j / u_c) if u_c > 0 else 0
+            
+            if u_ratio > best_ratio or (u_ratio == best_ratio and u_j > float(best_perf.get("joins", 0))):
+                best_ratio = u_ratio
+                best_perf = dict(u_perf)
+                
+            u_hlog = udata.get("hour_activity_log", {}).get(hash_str, {})
+            if sum(float(x) for x in u_hlog.values()) > sum(float(x) for x in best_hour_log.values()):
+                best_hour_log = dict(u_hlog)
+                
+        # Apply the synced hive mind stats to the current account
+        data.setdefault("link_performance", {})[hash_str] = dict(best_perf)
+        data.setdefault("hour_activity_log", {})[hash_str] = dict(best_hour_log)
+        # ----------------------
+        
         # Get link grade performance for intelligent scaling
         perf = data.get("link_performance", {}).get(hash_str, {"checks": 0, "joins": 0})
         grade = get_link_grade(perf["checks"], perf["joins"]).split(' ')[0] # 🔥, ⭐, 📈, 📊, 📉, 💀, 🆕
