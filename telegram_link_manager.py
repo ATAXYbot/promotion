@@ -481,6 +481,7 @@ async def help_handler(event):
         "• `/start` - Open your dashboard or see the welcome message.\n"
         "• `/login` - Securely connect your Telegram account.\n"
         "• `/cancel` - Abort any current action (like logging in).\n"
+        "• `/reset <link>` - Wipe all stats and grades for a specific link.\n"
         "• `/help` - Show this message.\n\n"
         "**How to use the Dashboard:**\n"
         "Once logged in, use the inline buttons to add links to your queue. Click **Start Loop** to begin processing them. "
@@ -534,6 +535,34 @@ async def login_handler(event):
         "Please reply with your Telegram Phone Number in international format (e.g., `+1234567890`).\n"
         "Send /cancel to abort."
     )
+
+@bot_client.on(events.NewMessage(pattern='(?i)^/reset(?:\\s+(.+))?$'))
+async def reset_handler(event):
+    user_id = event.sender_id
+    data = get_user_data(user_id)
+    
+    match = event.pattern_match.group(1)
+    if not match:
+        await event.respond("❌ Please provide a link to reset. Usage: `/reset https://t.me/+Abcdef`")
+        return
+        
+    hash_str = extract_hash(match)
+    if not hash_str:
+        await event.respond("❌ Invalid link format.")
+        return
+        
+    # Reset all tracking stats for this link
+    if hash_str in data.get("link_performance", {}):
+        del data["link_performance"][hash_str]
+    if hash_str in data.get("hour_activity_log", {}):
+        del data["hour_activity_log"][hash_str]
+    if hash_str in data.get("link_stats", {}):
+        del data["link_stats"][hash_str]
+    if hash_str in data.get("link_last_action", {}):
+        del data["link_last_action"][hash_str]
+        
+    save_state()
+    await event.respond(f"✅ **Link Reset Successfully!**\nAll stats, grades, and AI logs for `{match}` have been completely wiped. It will be evaluated as a brand new `🆕` link on its next check!")
 
 @bot_client.on(events.NewMessage(pattern='(?i)^/cancel'))
 async def cancel_handler(event):
@@ -1679,6 +1708,7 @@ async def runner_engine(user_id: int, chat_id: int):
             
             recent_ids = []
             new_unique_users = 0
+            genuine_new_users_at_top = 0
             provided_participants = False
             if hasattr(invite_info, 'participants') and invite_info.participants:
                 provided_participants = True
@@ -1686,7 +1716,7 @@ async def runner_engine(user_id: int, chat_id: int):
                 global_blacklist = data.setdefault("global_blacklist", [])
                 global_seen = data.setdefault("global_seen_users", {})
                 
-                for p in invite_info.participants:
+                for i, p in enumerate(invite_info.participants):
                     # Hive Mind Spam Check
                     if p.id in global_blacklist or p.id in GLOBAL_SPAMMERS:
                         continue # Completely ignore blacklisted user
@@ -1710,6 +1740,11 @@ async def runner_engine(user_id: int, chat_id: int):
                     recent_ids.append(p.id)
                     if p.id not in seen_users:
                         new_unique_users += 1
+                        # Next-Level Intelligence: Positional Indexing
+                        # If the new user is in the top 50, they are a genuine recent joiner.
+                        # If they are hiding at index 150+, it's a Telegram API Shuffle ghost join.
+                        if i < 50:
+                            genuine_new_users_at_top += 1
             
             if participants_count is not None:
                 # High Traffic Logic
@@ -1720,14 +1755,14 @@ async def runner_engine(user_id: int, chat_id: int):
                     diff = participants_count - last_count
                     
                     if diff >= 10:
-                        if provided_participants and new_unique_users == 0:
+                        if provided_participants and genuine_new_users_at_top == 0:
                             is_active_mode = False
                             await send_alert(user_id, chat_id, f"📉 **Passive Mode (Spam Filter):** Ignored {diff} joins in `{link}` because they were all repeat spammers.", priority="LOW")
                         else:
                             is_active_mode = True
                             data.setdefault("high_traffic_links", {})[hash_str] = time.time()
                             await send_alert(user_id, chat_id, f"🔥 **Active Mode (High Traffic):** {diff} new users joined `{link}`. Engaging!", priority="HIGH")
-                    elif new_unique_users > 0 or (diff >= 1 and not provided_participants):
+                    elif genuine_new_users_at_top > 0 or (diff >= 1 and not provided_participants):
                         if is_high_traffic:
                             is_active_mode = False
                             await send_alert(user_id, chat_id, f"⏳ **Passive Mode (Throttling):** Genuine new users detected in `{link}`, waiting for 10 users because group is High Traffic.")
@@ -1907,33 +1942,6 @@ async def runner_engine(user_id: int, chat_id: int):
         is_night_mode = 1 <= now_ist.hour < 5
 
         # Determine reschedule delay based on diff and active mode
-        
-        # --- HIVE MIND SYNC ---
-        # Share Grades & Peak Hours across all accounts for the same link
-        best_perf = data.get("link_performance", {}).get(hash_str, {"checks": 0, "joins": 0})
-        best_ratio = (float(best_perf.get("joins", 0)) / float(best_perf.get("checks", 0))) if float(best_perf.get("checks", 0)) > 0 else 0
-        best_hour_log = data.get("hour_activity_log", {}).get(hash_str, {})
-        
-        for uid, udata in user_data.items():
-            if not udata.get("loop_active"): continue
-            
-            u_perf = udata.get("link_performance", {}).get(hash_str, {})
-            u_c = float(u_perf.get("checks", 0))
-            u_j = float(u_perf.get("joins", 0))
-            u_ratio = (u_j / u_c) if u_c > 0 else 0
-            
-            if u_ratio > best_ratio or (u_ratio == best_ratio and u_j > float(best_perf.get("joins", 0))):
-                best_ratio = u_ratio
-                best_perf = dict(u_perf)
-                
-            u_hlog = udata.get("hour_activity_log", {}).get(hash_str, {})
-            if sum(float(x) for x in u_hlog.values()) > sum(float(x) for x in best_hour_log.values()):
-                best_hour_log = dict(u_hlog)
-                
-        # Apply the synced hive mind stats to the current account
-        data.setdefault("link_performance", {})[hash_str] = dict(best_perf)
-        data.setdefault("hour_activity_log", {})[hash_str] = dict(best_hour_log)
-        # ----------------------
         
         # Get link grade performance for intelligent scaling
         perf = data.get("link_performance", {}).get(hash_str, {"checks": 0, "joins": 0})
