@@ -633,7 +633,7 @@ async def message_handler(event):
             data["first_login_time"] = time.time()
             data["engine_uptime_start"] = time.time()
             instant_save_state()
-            await event.respond("✅ **Login Successful!** Session Warmup Protocol engaged for 72 hours. Send /start to open your control panel.")
+            await event.respond("✅ **Login Successful!** Send /start to open your control panel.")
         except SessionPasswordNeededError:
             data["login_state"] = "WAITING_PASSWORD"
             data["session_string"] = client.session.save()
@@ -663,7 +663,7 @@ async def message_handler(event):
             data["first_login_time"] = time.time()
             data["engine_uptime_start"] = time.time()
             instant_save_state()
-            await event.respond("✅ **Login Successful!** Session Warmup Protocol engaged for 72 hours. Send /start to open your control panel.")
+            await event.respond("✅ **Login Successful!** Send /start to open your control panel.")
             try:
                 await event.delete() # Delete password from chat history
             except:
@@ -1969,11 +1969,6 @@ async def runner_engine(user_id: int, chat_id: int):
             elif ratio == 0: # Dead hour
                 grade_multiplier *= 1.3 # Slow down
                 
-        # Session Warmup Protocol (3-Day Training Wheels)
-        first_login = data.get("first_login_time", 0)
-        if first_login > 0 and time.time() - first_login < (3 * 86400):
-            grade_multiplier *= 3.0 # Force massive delays during 72-hour warmup
-
         if participants_count is None:
             next_delay = 3600 # 1 hour for errors
             traffic_str = "❌ Error/Invalid"
