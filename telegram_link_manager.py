@@ -1771,8 +1771,10 @@ async def runner_engine(user_id: int, chat_id: int):
                     data.setdefault("link_last_action", {})[hash_str] = time.time()
                     save_state()
         except Exception as e:
-            # If we can't check it, default to active and let the join try block handle errors
-            pass
+            # FIX: If we can't check it (network glitch, etc), DO NOT JOIN blindly.
+            is_active_mode = False
+            participants_count = None
+            await send_alert(user_id, chat_id, f"⚠️ **Check Error:** Could not verify traffic for `{link}`. Safely rescheduling.", priority="LOW")
 
         if is_active_mode:
             data["active_links_count"] += 1
