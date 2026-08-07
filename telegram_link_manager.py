@@ -1377,6 +1377,7 @@ async def callback_handler(event):
             [pause_btn, stop_btn],
             sched_row,
             [Button.inline("✏️ Edit URL", f"edit_link_{idx}".encode('utf-8')), Button.inline("🗑️ Delete Link", f"del_link_{idx}".encode('utf-8'))],
+            [Button.inline("🔄 Reset Stats", f"reset_link_{idx}".encode('utf-8'))],
             [Button.inline("🔙 Back to Queue", b"show_queue_refresh")]
         ]
         await event.edit(msg, buttons=keyboard, link_preview=False)
@@ -1442,6 +1443,20 @@ async def callback_handler(event):
             save_state()
             await event.answer("Link deleted!", alert=True)
         event.data = b"show_queue_refresh"
+        await callback_handler(event)
+        
+    elif cb_data.startswith("reset_link_"):
+        idx = int(cb_data.split("_")[2])
+        if idx < len(data["queue"]):
+            hash_str = extract_hash(data["queue"][idx])
+            # Reset all tracking stats for this link
+            if hash_str in data.get("link_performance", {}): del data["link_performance"][hash_str]
+            if hash_str in data.get("hour_activity_log", {}): del data["hour_activity_log"][hash_str]
+            if hash_str in data.get("link_stats", {}): del data["link_stats"][hash_str]
+            if hash_str in data.get("link_last_action", {}): del data["link_last_action"][hash_str]
+            save_state()
+            await event.answer("Link stats have been completely reset!", alert=True)
+        event.data = f"manage_link_{idx}".encode('utf-8')
         await callback_handler(event)
 
     elif cb_data.startswith("edit_link_"):
