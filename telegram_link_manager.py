@@ -244,7 +244,10 @@ async def _save_state_async():
             "first_login_time": state.get("first_login_time", 0),
             "business_auto_reply": state.get("business_auto_reply", None),
             "business_replied_users": state.get("business_replied_users", {}),
-            "business_keyword_replies": state.get("business_keyword_replies", {})
+            "business_keyword_replies": state.get("business_keyword_replies", {}),
+            "business_audience": state.get("business_audience", "EVERYONE"),
+            "business_reply_frequency": state.get("business_reply_frequency", "24H"),
+            "stagger_mode": state.get("stagger_mode", "GLOBAL")
         }
         state_to_save[str(user_id)] = doc
         
@@ -1015,14 +1018,21 @@ async def callback_handler(event):
         reply_txt = data.get("business_auto_reply")
         reply_disp = reply_txt.get("text") if isinstance(reply_txt, dict) else reply_txt
         keyword_replies = data.get("business_keyword_replies", {})
+        audience = data.get("business_audience", "EVERYONE")
+        audience_str = "👥 Everyone" if audience == "EVERYONE" else "👤 Non-Contacts Only"
+        
+        freq = data.get("business_reply_frequency", "24H")
+        freq_str = "Once per 24 Hours" if freq == "24H" else "Once per 48 Hours" if freq == "48H" else "Once in a Lifetime"
         
         status = "🟢 ON" if (reply_txt or keyword_replies) else "🔴 OFF"
         msg = f"🤖 **CHAT AUTOMATION (Business)**\n"
         msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        msg += f"**Auto-Responder:** `{status}`\n\n"
+        msg += f"**Auto-Responder:** `{status}`\n"
+        msg += f"**Target Audience:** `{audience_str}`\n"
+        msg += f"**Default Reply Frequency:** `{freq_str}`\n\n"
         
         if reply_disp:
-            msg += f"**Default 24H Reply:**\n`{reply_disp}`\n\n"
+            msg += f"**Default Auto-Reply Text:**\n`{reply_disp}`\n\n"
             
         if keyword_replies:
             msg += f"**Keyword Replies ({len(keyword_replies)}):**\n"
@@ -1033,11 +1043,14 @@ async def callback_handler(event):
         msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
         msg += f"*Connect this bot to your Personal Account via Telegram Settings -> Telegram Business -> Chat Automation to auto-reply to DMs!*\n"
         
-        kb = [[Button.inline("📝 Set Default 24H Reply", b"set_business_reply")]]
+        kb = [[Button.inline("📝 Set Default Auto-Reply", b"set_business_reply")]]
         kb.append([Button.inline("➕ Add Keyword Reply", b"add_business_keyword")])
         
         if keyword_replies:
             kb.append([Button.inline("➖ Remove Keyword", b"remove_business_keyword")])
+            
+        kb.append([Button.inline(f"🎯 Target: {audience_str}", b"toggle_business_audience")])
+        kb.append([Button.inline(f"⏱️ Frequency: {freq_str}", b"toggle_business_frequency")])
             
         if reply_txt or keyword_replies:
             kb.append([Button.inline("❌ Turn OFF All", b"turn_off_business")])
@@ -1048,7 +1061,7 @@ async def callback_handler(event):
     elif cb_data == "set_business_reply":
         data["login_state"] = "WAITING_BUSINESS_REPLY"
         save_state()
-        await event.respond("Send me the exact text you want the bot to auto-reply to users with as a default 24-hour welcome message:")
+        await event.respond("Send me the exact text you want the bot to auto-reply to users with as a default welcome message:")
         
     elif cb_data == "add_business_keyword":
         data["login_state"] = "WAITING_BUSINESS_KEYWORD"
@@ -1076,6 +1089,39 @@ async def callback_handler(event):
         save_state()
         await event.respond(msg)
         
+    elif cb_data == "toggle_business_audience":
+        current = data.get("business_audience", "EVERYONE")
+        data["business_audience"] = "NON_CONTACTS" if current == "EVERYONE" else "EVERYONE"
+        save_state()
+        await event.answer(f"Target changed to: {data['business_audience']}", alert=True)
+        # Re-render business menu
+        class DummyEventBusiness:
+            data = b"business_menu"
+            sender_id = user_id
+            chat_id = event.chat_id
+            async def edit(self, *args, **kwargs): pass
+            async def answer(self, *args, **kwargs): pass
+        await callback_handler(DummyEventBusiness())
+
+    elif cb_data == "toggle_business_frequency":
+        current = data.get("business_reply_frequency", "24H")
+        if current == "24H":
+            data["business_reply_frequency"] = "48H"
+        elif current == "48H":
+            data["business_reply_frequency"] = "LIFETIME"
+        else:
+            data["business_reply_frequency"] = "24H"
+        save_state()
+        await event.answer(f"Frequency changed to: {data['business_reply_frequency']}", alert=True)
+        # Re-render business menu
+        class DummyEventBusiness:
+            data = b"business_menu"
+            sender_id = user_id
+            chat_id = event.chat_id
+            async def edit(self, *args, **kwargs): pass
+            async def answer(self, *args, **kwargs): pass
+        await callback_handler(DummyEventBusiness())
+
     elif cb_data == "turn_off_business":
         data["business_auto_reply"] = None
         data["business_keyword_replies"] = {}
@@ -1148,23 +1194,38 @@ async def callback_handler(event):
         
     elif cb_data == "settings_menu":
         mode = data.get("notification_mode", "ALL")
+        stagger = data.get("stagger_mode", "GLOBAL")
         msg = "⚙️ **SYSTEM CONFIGURATION**\n"
         msg += "━━━━━━━━━━━━━━━━━━━━━━\n"
         msg += "**Notification Level:**\n"
-        msg += "Choose how aggressively the bot alerts you about queue events.\n"
+        msg += "Choose how aggressively the bot alerts you about queue events.\n\n"
+        msg += "**Link Checking Mode:**\n"
+        msg += "`Shared` = Balances timers across all bot accounts for the same links.\n"
+        msg += "`Isolated` = Independent timers (ignores other accounts running the same links).\n"
         
         btn_all = "✅ Everything" if mode == "ALL" else "Everything"
         btn_viral = "✅ Viral Only" if mode == "VIRAL_ONLY" else "Viral Only"
         btn_silent = "✅ Silent Mode" if mode == "SILENT" else "Silent Mode"
         
+        stagger_str = "🌐 Mode: Shared (Global)" if stagger == "GLOBAL" else "👤 Mode: Isolated"
+        
         keyboard = [
             [Button.inline(btn_all, b"set_notif_ALL")],
             [Button.inline(btn_viral, b"set_notif_VIRAL_ONLY")],
             [Button.inline(btn_silent, b"set_notif_SILENT")],
+            [Button.inline(stagger_str, b"toggle_stagger_mode")],
             [Button.inline("🌐 Proxy Manager", b"proxies_menu")],
             [Button.inline("🔙 Back to Dashboard", b"back_to_menu")]
         ]
         await event.edit(msg, buttons=keyboard)
+
+    elif cb_data == "toggle_stagger_mode":
+        current = data.get("stagger_mode", "GLOBAL")
+        data["stagger_mode"] = "ISOLATED" if current == "GLOBAL" else "GLOBAL"
+        save_state()
+        await event.answer(f"Checking Mode changed to: {data['stagger_mode']}", alert=True)
+        event.data = b"settings_menu"
+        await callback_handler(event)
         
     elif cb_data.startswith("set_notif_"):
         new_mode = cb_data.split("set_notif_")[1]
@@ -2043,17 +2104,20 @@ async def runner_engine(user_id: int, chat_id: int):
         base_target_time = time.time() + next_delay
         actual_delay = next_delay
         
-        N = 0
-        for uid, udata in user_data.items():
-            if udata.get("loop_active"):
-                for q_link in udata.get("queue", []):
-                    if extract_hash(q_link) == hash_str:
-                        N += 1
-                        break
-                        
-        if N > 1:
-            ideal_gap = next_delay / N
-            scheduled_times = GLOBAL_LINK_SCHEDULES.get(hash_str, [])
+        is_isolated = data.get("stagger_mode", "GLOBAL") == "ISOLATED"
+        
+        if not is_isolated:
+            N = 0
+            for uid, udata in user_data.items():
+                if udata.get("loop_active") and udata.get("stagger_mode", "GLOBAL") == "GLOBAL":
+                    for q_link in udata.get("queue", []):
+                        if extract_hash(q_link) == hash_str:
+                            N += 1
+                            break
+                            
+            if N > 1:
+                ideal_gap = next_delay / N
+                scheduled_times = GLOBAL_LINK_SCHEDULES.get(hash_str, [])
             now = time.time()
             scheduled_times = [t for t in scheduled_times if t > now]
             
@@ -2254,6 +2318,26 @@ async def business_message_handler(event):
         
     now = time.time()
     
+    audience = data.get("business_audience", "EVERYONE")
+    if audience == "NON_CONTACTS":
+        user_client = data.get("client")
+        if user_client:
+            try:
+                # Cache the contact status so we don't burn bandwidth calling get_entity on every message
+                contact_cache = data.setdefault("contact_cache", {})
+                str_sender = str(sender_id)
+                if str_sender not in contact_cache:
+                    sender_entity = await user_client.get_entity(sender_id)
+                    contact_cache[str_sender] = getattr(sender_entity, 'contact', False)
+                    
+                if contact_cache[str_sender]:
+                    logger.info(f"Skipping auto-reply to {sender_id} because they are a contact.")
+                    return
+            except Exception as e:
+                logger.error(f"Failed to check contact status: {e}")
+        else:
+            logger.info("Cannot verify contact status because user client is not connected. Assuming non-contact.")
+
     # -----------------------------
     # 1. KEYWORD REPLY CHECK
     # -----------------------------
@@ -2293,22 +2377,28 @@ async def business_message_handler(event):
         return
 
     # -----------------------------
-    # 2. DEFAULT 24-HOUR REPLY CHECK
+    # 2. DEFAULT AUTO-REPLY CHECK
     # -----------------------------
     reply_text = data.get("business_auto_reply")
     logger.info(f"Business Owner ID: {user_id}, Reply Text Set: {reply_text is not None}")
     if not reply_text:
         return
         
-    # Clean up old anti-spam entries (older than 24h)
+    frequency = data.get("business_reply_frequency", "24H")
+    ttl = 86400 # 24H Default
+    if frequency == "48H":
+        ttl = 172800
+    elif frequency == "LIFETIME":
+        ttl = float('inf')
+        
     replied_cache = data.setdefault("business_replied_users", {})
-    keys_to_delete = [k for k, v in replied_cache.items() if now - v > 86400]
+    keys_to_delete = [k for k, v in replied_cache.items() if now - v > ttl]
     for k in keys_to_delete:
         del replied_cache[k]
         
     if str(sender_id) in replied_cache:
-        logger.info(f"Already replied to {sender_id} within 24h. Ignoring.")
-        return # Already replied to this person today
+        logger.info(f"Already replied to {sender_id} within TTL. Ignoring.")
+        return # Already replied to this person
         
     try:
         logger.info(f"Sending business reply to sender {sender_id} for connection {conn_id}...")
