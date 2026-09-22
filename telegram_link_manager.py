@@ -73,6 +73,8 @@ bot_client = TelegramClient('sessions/control_bot', API_ID, API_HASH)
 # ==========================================
 user_data = {}
 GLOBAL_LINK_SCHEDULES = {}
+GLOBAL_JOIN_TICKETS = {}
+KNOWN_BOT_IDS = set()
 STATE_FILE = "sessions/state.json"
 
 async def load_state():
@@ -125,7 +127,8 @@ async def load_state():
                     "first_login_time": doc.get("first_login_time", 0),
                     "business_auto_reply": doc.get("business_auto_reply", None),
                     "business_replied_users": doc.get("business_replied_users", {}),
-                    "business_keyword_replies": doc.get("business_keyword_replies", {})
+                    "business_keyword_replies": doc.get("business_keyword_replies", {}),
+                    "link_join_modes": doc.get("link_join_modes", {})
                 }
             loaded_from_db = True
             logger.info("State successfully loaded from MongoDB.")
@@ -185,7 +188,8 @@ async def load_state():
                         "first_login_time": state.get("first_login_time", 0),
                         "business_auto_reply": state.get("business_auto_reply", None),
                         "business_replied_users": state.get("business_replied_users", {}),
-                        "business_keyword_replies": state.get("business_keyword_replies", {})
+                        "business_keyword_replies": state.get("business_keyword_replies", {}),
+                        "link_join_modes": state.get("link_join_modes", {})
                     }
         except Exception as e:
             logger.error(f"Error loading state from local file: {e}")
@@ -247,7 +251,8 @@ async def _save_state_async():
             "business_keyword_replies": state.get("business_keyword_replies", {}),
             "business_audience": state.get("business_audience", "EVERYONE"),
             "business_reply_frequency": state.get("business_reply_frequency", "24H"),
-            "stagger_mode": state.get("stagger_mode", "GLOBAL")
+            "stagger_mode": state.get("stagger_mode", "GLOBAL"),
+            "link_join_modes": state.get("link_join_modes", {})
         }
         state_to_save[str(user_id)] = doc
         
@@ -315,7 +320,8 @@ def get_user_data(user_id):
             "spoofed_device": None,
             "business_auto_reply": None,
             "business_replied_users": {},
-            "business_keyword_replies": {}
+            "business_keyword_replies": {},
+            "link_join_modes": {}
         }
     return user_data[user_id]
 
@@ -1434,9 +1440,20 @@ async def callback_handler(event):
         
         sched_row = [Button.inline("🕒 Edit Schedule", f"set_sched_{idx}".encode('utf-8')), Button.inline("❌ Clear Schedule", f"clr_sched_{idx}".encode('utf-8'))] if active_hours else [Button.inline("🕒 Set Schedule", f"set_sched_{idx}".encode('utf-8'))]
         
+        current_mode = data.get("link_join_modes", {}).get(hash_str, "DEFAULT")
+        if current_mode == "SPECTATOR_MONITOR":
+            mode_btn_text = "👁️ Mode: Spectator (Monitor)"
+        elif current_mode == "SPECTATOR_JOINER":
+            mode_btn_text = "🚀 Mode: Spectator (Joiner)"
+        else:
+            mode_btn_text = "🔧 Mode: Default"
+            
+        mode_btn = Button.inline(mode_btn_text, f"toggle_mode_{idx}".encode('utf-8'))
+        
         keyboard = [
             [pause_btn, stop_btn],
             sched_row,
+            [mode_btn],
             [Button.inline("✏️ Edit URL", f"edit_link_{idx}".encode('utf-8')), Button.inline("🗑️ Delete Link", f"del_link_{idx}".encode('utf-8'))],
             [Button.inline("🔄 Reset Stats", f"reset_link_{idx}".encode('utf-8'))],
             [Button.inline("🔙 Back to Queue", b"show_queue_refresh")]
@@ -1464,6 +1481,21 @@ async def callback_handler(event):
         hash_str = extract_hash(data["queue"][idx])
         if hash_str in data.setdefault("paused_links", []):
             data["paused_links"].remove(hash_str)
+        save_state()
+        event.data = f"manage_link_{idx}".encode('utf-8')
+        await callback_handler(event)
+
+    elif cb_data.startswith("toggle_mode_"):
+        idx = int(cb_data.split("_")[2])
+        hash_str = extract_hash(data["queue"][idx])
+        current = data.setdefault("link_join_modes", {}).get(hash_str, "DEFAULT")
+        if current == "DEFAULT":
+            new_mode = "SPECTATOR_MONITOR"
+        elif current == "SPECTATOR_MONITOR":
+            new_mode = "SPECTATOR_JOINER"
+        else:
+            new_mode = "DEFAULT"
+        data["link_join_modes"][hash_str] = new_mode
         save_state()
         event.data = f"manage_link_{idx}".encode('utf-8')
         await callback_handler(event)
@@ -1608,7 +1640,9 @@ async def runner_engine(user_id: int, chat_id: int):
                 user_client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, **kwargs)
                     
                 await user_client.connect()
-                try: await user_client.get_me() # Sync AuthKey
+                try: 
+                    me = await user_client.get_me() # Sync AuthKey
+                    if me: KNOWN_BOT_IDS.add(me.id)
                 except: pass
                 
                 data["client"] = user_client
@@ -1749,7 +1783,35 @@ async def runner_engine(user_id: int, chat_id: int):
         last_count = data.get("link_stats", {}).get(hash_str, 0)
         
         try:
-            invite_info = await user_client(CheckChatInviteRequest(hash_str))
+            is_public_group = False
+            try:
+                invite_info = await user_client(CheckChatInviteRequest(hash_str))
+            except Exception as e:
+                # Fallback for public groups
+                from telethon.tl.functions.channels import GetFullChannelRequest
+                entity = await user_client.get_entity(hash_str)
+                full_chat_req = await user_client(GetFullChannelRequest(entity))
+                
+                class PublicGroupMock:
+                    def __init__(self, count, title, chat, participants):
+                        self.participants_count = count
+                        self.title = title
+                        self.chat = chat
+                        self.participants = participants
+                
+                invite_info = PublicGroupMock(
+                    full_chat_req.full_chat.participants_count,
+                    entity.title,
+                    entity,
+                    []
+                )
+                is_public_group = True
+                
+                try:
+                    participants_list = await user_client.get_participants(entity, limit=50)
+                    invite_info.participants = participants_list
+                except:
+                    pass
             
             # Record analytics: Intelligent Decay (Rolling Window)
             # Keeps the grade dynamically shifting based on RECENT traffic
@@ -1826,8 +1888,22 @@ async def runner_engine(user_id: int, chat_id: int):
                 # High Traffic Logic
                 is_high_traffic = data.get("high_traffic_links", {}).get(hash_str, 0) > time.time() - 300 # Valid for 5 mins
                 
-                if last_count > 0:
-                    time_since_last_action = time.time() - data.get("link_last_action", {}).get(hash_str, 0)
+                current_mode = data.get("link_join_modes", {}).get(hash_str, "DEFAULT")
+                last_action_time = data.get("link_last_action", {}).get(hash_str, 0)
+                
+                if current_mode == "SPECTATOR_JOINER" and last_count > 0:
+                    ticket_time = GLOBAL_JOIN_TICKETS.get(hash_str, 0)
+                    if ticket_time > last_action_time:
+                        # Consume ticket
+                        GLOBAL_JOIN_TICKETS[hash_str] = 0
+                        is_active_mode = True
+                        diff = 1
+                        await send_alert(user_id, chat_id, f"🚀 **Spectator Ticket Consumed:** Foreign join detected by monitor for `{link}`. Engaging!", priority="HIGH")
+                    else:
+                        is_active_mode = False
+                        await send_alert(user_id, chat_id, f"📉 **Joiner Pool:** No tickets available for `{link}`. Sleeping.", priority="LOW")
+                elif last_count > 0:
+                    time_since_last_action = time.time() - last_action_time
                     diff = participants_count - last_count
                     
                     if diff >= 10:
@@ -1901,12 +1977,18 @@ async def runner_engine(user_id: int, chat_id: int):
                 break
                 
             try:
-                updates = await user_client(ImportChatInviteRequest(hash_str))
+                if is_public_group:
+                    from telethon.tl.functions.channels import JoinChannelRequest
+                    updates = await user_client(JoinChannelRequest(invite_info.chat))
+                else:
+                    updates = await user_client(ImportChatInviteRequest(hash_str))
                 
-                if updates.chats:
+                if hasattr(updates, 'chats') and updates.chats:
                     joined_chat_id = updates.chats[0].id
                 else:
-                    raise Exception("Could not resolve Chat ID from the join request updates.")
+                    joined_chat_id = invite_info.chat.id if is_public_group else None
+                    if not joined_chat_id:
+                        raise Exception("Could not resolve Chat ID from the join request updates.")
                 
                 data["daily_joins"].append(time.time())
                 
@@ -1965,7 +2047,89 @@ async def runner_engine(user_id: int, chat_id: int):
                 if not await interruptible_sleep(rem_delay, user_id):
                     break
                     
-                await user_client.delete_dialog(joined_chat_id)
+                if current_mode == "SPECTATOR_MONITOR":
+                    handler_name = f"_spectator_{joined_chat_id}"
+                    if not getattr(user_client, handler_name, False):
+                        @user_client.on(events.ChatAction(chats=[joined_chat_id]))
+                        async def spectator_handler(event):
+                            if event.user_joined or event.user_added:
+                                if event.user_id in KNOWN_BOT_IDS:
+                                    return
+                                    
+                                # Screen Visibility Check (Dynamic Height Calculation)
+                                try:
+                                    # Fetch more messages to ensure we can calculate screen overflow
+                                    recent_msgs = await event.client.get_messages(event.chat_id, limit=30)
+                                    friend_visible = False
+                                    
+                                    # Standard mobile screen height is roughly 800 arbitrary "units"
+                                    MAX_SCREEN_HEIGHT = 800
+                                    current_height = 0
+                                    
+                                    for msg in recent_msgs:
+                                        # Estimate message height
+                                        msg_height = 40 # Base height for any message (name, padding)
+                                        
+                                        if getattr(msg, 'action', None):
+                                            # Service messages (like joins/leaves) are very small
+                                            msg_height = 30
+                                            
+                                            # Account for users using long names or invisible characters to push chat up
+                                            if hasattr(msg, 'sender') and msg.sender:
+                                                name_len = len(getattr(msg.sender, 'first_name', '') or '') + len(getattr(msg.sender, 'last_name', '') or '')
+                                                msg_height += (name_len // 40) * 20
+                                                
+                                            if hasattr(msg.action, 'users'):
+                                                if msg.sender_id in KNOWN_BOT_IDS:
+                                                    friend_visible = True
+                                                    break
+                                        else:
+                                            # Text messages: add height based on length (wrap)
+                                            if msg.text:
+                                                # roughly 20 units per 40 characters
+                                                msg_height += (len(msg.text) // 40) * 20
+                                            
+                                            # Media (Photos, Videos, Stickers) take a lot of space
+                                            if msg.media:
+                                                msg_height += 250
+                                                
+                                            # Forwards or Replies add extra header padding
+                                            if getattr(msg, 'fwd_from', None) or getattr(msg, 'reply_to_msg_id', None):
+                                                msg_height += 40
+                                                
+                                        current_height += msg_height
+                                        
+                                        if current_height >= MAX_SCREEN_HEIGHT:
+                                            # Screen is full of other messages, friend is pushed off
+                                            break
+                                            
+                                    if not friend_visible:
+                                        GLOBAL_JOIN_TICKETS[hash_str] = time.time()
+                                except Exception:
+                                    # Fallback
+                                    GLOBAL_JOIN_TICKETS[hash_str] = time.time()
+                        
+                        setattr(user_client, handler_name, True)
+                        await send_alert(user_id, chat_id, f"👁️ **Spectator Mode:** Remained in `{link}` to monitor for foreign joins.", priority="HIGH")
+                else:
+                    try:
+                        from telethon.tl.functions.messages import SendReactionRequest
+                        from telethon.tl.types import ReactionEmoji
+                        me = await user_client.get_me()
+                        my_id = me.id if me else None
+                        async for msg in user_client.iter_messages(joined_chat_id, limit=20):
+                            if getattr(msg, 'action', None) and hasattr(msg.action, 'users'):
+                                if msg.sender_id in KNOWN_BOT_IDS and msg.sender_id != my_id:
+                                    try:
+                                        await user_client(SendReactionRequest(
+                                            peer=joined_chat_id,
+                                            msg_id=msg.id,
+                                            reaction=[ReactionEmoji(emoticon='🔥')]
+                                        ))
+                                    except: pass
+                    except: pass
+                    
+                    await user_client.delete_dialog(joined_chat_id)
                 
             except UserAlreadyParticipantError:
                 await send_alert(user_id, chat_id, f"🧹 Already in `{link}` (likely due to a previous crash). Cleaning up and keeping in queue.", priority="LOW")
