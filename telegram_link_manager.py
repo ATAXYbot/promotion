@@ -128,7 +128,8 @@ async def load_state():
                     "business_auto_reply": doc.get("business_auto_reply", None),
                     "business_replied_users": doc.get("business_replied_users", {}),
                     "business_keyword_replies": doc.get("business_keyword_replies", {}),
-                    "link_join_modes": doc.get("link_join_modes", {})
+                    "link_join_modes": doc.get("link_join_modes", {}),
+                    "is_spectator_account": doc.get("is_spectator_account", False)
                 }
             loaded_from_db = True
             logger.info("State successfully loaded from MongoDB.")
@@ -189,7 +190,8 @@ async def load_state():
                         "business_auto_reply": state.get("business_auto_reply", None),
                         "business_replied_users": state.get("business_replied_users", {}),
                         "business_keyword_replies": state.get("business_keyword_replies", {}),
-                        "link_join_modes": state.get("link_join_modes", {})
+                        "link_join_modes": state.get("link_join_modes", {}),
+                        "is_spectator_account": state.get("is_spectator_account", False)
                     }
         except Exception as e:
             logger.error(f"Error loading state from local file: {e}")
@@ -252,7 +254,8 @@ async def _save_state_async():
             "business_audience": state.get("business_audience", "EVERYONE"),
             "business_reply_frequency": state.get("business_reply_frequency", "24H"),
             "stagger_mode": state.get("stagger_mode", "GLOBAL"),
-            "link_join_modes": state.get("link_join_modes", {})
+            "link_join_modes": state.get("link_join_modes", {}),
+            "is_spectator_account": state.get("is_spectator_account", False)
         }
         state_to_save[str(user_id)] = doc
         
@@ -321,7 +324,8 @@ def get_user_data(user_id):
             "business_auto_reply": None,
             "business_replied_users": {},
             "business_keyword_replies": {},
-            "link_join_modes": {}
+            "link_join_modes": {},
+            "is_spectator_account": False
         }
     return user_data[user_id]
 
@@ -421,12 +425,14 @@ async def show_menu(chat_id: int, user_id: int, event=None):
         authorized = True
         
     if authorized:
+        spectator_btn = Button.inline("🛑 Stop Master Spectator", b"toggle_spectator") if data.get("is_spectator_account") else Button.inline("👁️ Make Master Spectator", b"toggle_spectator")
+        
         keyboard = [
             [Button.inline("▶️ START ENGINE", b"start_loop"), Button.inline("⏸️ STOP ENGINE", b"stop_loop")],
             [Button.inline("➕ Add New Link", b"add_link"), Button.inline("📊 Live Queue", b"show_queue")],
             [Button.inline("📝 Live Logs", b"show_live_log"), Button.inline("⚙️ Settings & Proxy", b"settings_menu")],
             [Button.inline("🤖 Chat Automation", b"business_menu"), Button.inline("🩺 Live Diagnostics", b"show_diagnostics")],
-            [Button.inline("🚪 Secure Logout", b"logout")]
+            [spectator_btn, Button.inline("🚪 Secure Logout", b"logout")]
         ]
         status = "🟢 ACTIVE (Running)" if data["loop_active"] else "🔴 PAUSED (Stopped)"
         
@@ -1020,6 +1026,25 @@ async def callback_handler(event):
         save_state()
         await event.respond(msg)
         
+    elif cb_data == "toggle_spectator":
+        data["is_spectator_account"] = not data.get("is_spectator_account", False)
+        save_state()
+        status = "Master Spectator" if data["is_spectator_account"] else "Normal Joiner"
+        await event.answer(f"Account mode set to: {status}", alert=True)
+        await show_menu(event.chat_id, user_id, event=event)
+        
+    elif cb_data == "logout":
+        if data["client"]:
+            try:
+                await data["client"].log_out()
+            except: pass
+            data["client"] = None
+        data["session_string"] = ""
+        data["phone"] = None
+        save_state()
+        await event.answer("Logged out successfully.", alert=True)
+        await show_menu(event.chat_id, user_id, event=event)
+        
     elif cb_data == "business_menu":
         reply_txt = data.get("business_auto_reply")
         reply_disp = reply_txt.get("text") if isinstance(reply_txt, dict) else reply_txt
@@ -1441,9 +1466,7 @@ async def callback_handler(event):
         sched_row = [Button.inline("🕒 Edit Schedule", f"set_sched_{idx}".encode('utf-8')), Button.inline("❌ Clear Schedule", f"clr_sched_{idx}".encode('utf-8'))] if active_hours else [Button.inline("🕒 Set Schedule", f"set_sched_{idx}".encode('utf-8'))]
         
         current_mode = data.get("link_join_modes", {}).get(hash_str, "DEFAULT")
-        if current_mode == "SPECTATOR_MONITOR":
-            mode_btn_text = "👁️ Mode: Spectator (Monitor)"
-        elif current_mode == "SPECTATOR_JOINER":
+        if current_mode == "SPECTATOR_JOINER":
             mode_btn_text = "🚀 Mode: Spectator (Joiner)"
         else:
             mode_btn_text = "🔧 Mode: Default"
@@ -1490,8 +1513,6 @@ async def callback_handler(event):
         hash_str = extract_hash(data["queue"][idx])
         current = data.setdefault("link_join_modes", {}).get(hash_str, "DEFAULT")
         if current == "DEFAULT":
-            new_mode = "SPECTATOR_MONITOR"
-        elif current == "SPECTATOR_MONITOR":
             new_mode = "SPECTATOR_JOINER"
         else:
             new_mode = "DEFAULT"
@@ -1615,9 +1636,146 @@ async def callback_handler(event):
 # ISOLATED RUNNER ENGINE
 # ==========================================
 
+async def master_spectator_engine(user_id: int, chat_id: int):
+    data = get_user_data(user_id)
+    user_client = data.get("client")
+    
+    if not user_client or not await user_client.is_user_authorized():
+        data["loop_active"] = False
+        save_state()
+        await send_alert(user_id, chat_id, "❌ Master Spectator Engine stopped: Client not authorized.", priority="CRITICAL")
+        return
+        
+    await send_alert(user_id, chat_id, "👁️ **Master Spectator Engine Started**\nScanning all accounts for Spectator Joiner links...", priority="HIGH")
+    
+    me = await user_client.get_me()
+    KNOWN_BOT_IDS.add(me.id)
+    
+    monitored_chats = {} 
+    
+    if not getattr(user_client, "_global_spectator_attached", False):
+        @user_client.on(events.ChatAction)
+        async def global_spectator_handler(event):
+            if event.chat_id not in monitored_chats: return
+            if event.user_joined or event.user_added:
+                if event.user_id in KNOWN_BOT_IDS: return
+                target_hash = monitored_chats[event.chat_id]["hash_str"]
+                try:
+                    recent_msgs = await event.client.get_messages(event.chat_id, limit=30)
+                    friend_visible = False
+                    current_height = 0
+                    for msg in recent_msgs:
+                        msg_height = 40
+                        if getattr(msg, 'action', None):
+                            msg_height = 30
+                            if hasattr(msg, 'sender') and msg.sender:
+                                name_len = len(getattr(msg.sender, 'first_name', '') or '') + len(getattr(msg.sender, 'last_name', '') or '')
+                                msg_height += (name_len // 40) * 20
+                            if hasattr(msg.action, 'users'):
+                                if msg.sender_id in KNOWN_BOT_IDS:
+                                    friend_visible = True
+                                    break
+                        else:
+                            if getattr(msg, 'text', None): msg_height += (len(msg.text) // 40) * 20
+                            if getattr(msg, 'media', None): msg_height += 250
+                            if getattr(msg, 'fwd_from', None) or getattr(msg, 'reply_to_msg_id', None): msg_height += 40
+                        current_height += msg_height
+                        if current_height >= 800: break
+                    if not friend_visible: GLOBAL_JOIN_TICKETS[target_hash] = time.time()
+                except Exception:
+                    GLOBAL_JOIN_TICKETS[target_hash] = time.time()
+        setattr(user_client, "_global_spectator_attached", True)
+        
+    from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
+    from telethon.tl.functions.channels import JoinChannelRequest, GetFullChannelRequest
+    
+    while data["loop_active"]:
+        required_hashes = set()
+        hash_to_link = {}
+        for u_id, u_data in user_data.items():
+            for link in u_data.get("queue", []):
+                h = extract_hash(link)
+                if h in u_data.get("stopped_links", []): continue
+                if u_data.get("link_join_modes", {}).get(h) == "SPECTATOR_JOINER":
+                    required_hashes.add(h)
+                    hash_to_link[h] = link
+                    
+        for c_id in list(monitored_chats.keys()):
+            if monitored_chats[c_id]["hash_str"] not in required_hashes:
+                del monitored_chats[c_id]
+                
+        current_hashes = {m["hash_str"] for m in monitored_chats.values()}
+        for h in required_hashes:
+            if not data["loop_active"]: break
+            if h not in current_hashes:
+                link = hash_to_link[h]
+                try:
+                    chat_id = None
+                    last_count = 0
+                    is_public = False
+                    if '+' not in link and 'joinchat' not in link: is_public = True
+                    if is_public:
+                        entity = await user_client.get_entity(h)
+                        try: await user_client(JoinChannelRequest(entity))
+                        except Exception: pass
+                        chat_id = entity.id
+                        full = await user_client(GetFullChannelRequest(entity))
+                        last_count = full.full_chat.participants_count or 0
+                    else:
+                        try:
+                            invite = await user_client(CheckChatInviteRequest(h))
+                            chat_id = invite.chat.id
+                            last_count = getattr(invite.chat, 'participants_count', 0)
+                            try: await user_client(ImportChatInviteRequest(h))
+                            except Exception: pass
+                        except Exception: pass
+                            
+                    if chat_id:
+                        monitored_chats[chat_id] = {"hash_str": h, "last_count": last_count}
+                        await send_alert(user_id, chat_id, f"👁️ **Master Spectator:** Attached to `{link}`", priority="LOW")
+                except Exception as e:
+                    logger.error(f"Master Spectator failed to attach to {h}: {e}")
+                    
+        for c_id, m_data in list(monitored_chats.items()):
+            if not data["loop_active"]: break
+            try:
+                entity = await user_client.get_entity(c_id)
+                full = await user_client(GetFullChannelRequest(entity))
+                new_count = full.full_chat.participants_count or 0
+                
+                diff = new_count - m_data["last_count"]
+                if diff >= 3:
+                    recent_msgs = await user_client.get_messages(c_id, limit=50)
+                    has_join_msgs = False
+                    from telethon.tl.types import MessageActionChatAddUser, MessageActionChatJoinedByLink
+                    for msg in recent_msgs:
+                        if getattr(msg, 'action', None) and isinstance(msg.action, (MessageActionChatAddUser, MessageActionChatJoinedByLink)):
+                            has_join_msgs = True
+                            break
+                            
+                    if not has_join_msgs:
+                        target_hash = m_data["hash_str"]
+                        for u_id, u_data in user_data.items():
+                            if target_hash not in u_data.get("stopped_links", []):
+                                u_data.setdefault("stopped_links", []).append(target_hash)
+                        save_state()
+                        
+                        await send_alert(user_id, chat_id, f"🚨 **Hidden Joins Detected!**\nGroup `{target_hash}` grew by {diff} users but 0 join messages were found. Admins are hiding joins! Link has been **AUTO-STOPPED** globally.", priority="CRITICAL")
+                        del monitored_chats[c_id]
+                        continue
+                        
+                m_data["last_count"] = new_count
+            except Exception: pass
+                
+        for _ in range(60):
+            if not data["loop_active"]: break
+            await asyncio.sleep(1)
+
 async def runner_engine(user_id: int, chat_id: int):
     data = get_user_data(user_id)
-    
+    if data.get("is_spectator_account"):
+        return await master_spectator_engine(user_id, chat_id)
+        
     while True:
         if not data["loop_active"] or not data["queue"]:
             if not data["loop_active"]:
