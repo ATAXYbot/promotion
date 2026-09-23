@@ -2154,11 +2154,18 @@ async def runner_engine(user_id: int, chat_id: int):
                             data.setdefault("link_seen_users", {})[hash_str] = current_seen[-200:]
                         data.setdefault("link_last_action", {})[hash_str] = time.time()
                         save_state()
+            except FloodWaitError as e:
+                is_active_mode = False
+                participants_count = None
+                sleep_time = e.seconds + 30
+                await send_alert(user_id, chat_id, f"🚨 **FloodWaitError (Check Phase):** Telegram asked to wait {e.seconds}s. Sleeping for {sleep_time}s...")
+                if not await interruptible_sleep(sleep_time, user_id):
+                    break
             except Exception as e:
                 # FIX: If we can't check it (network glitch, etc), DO NOT JOIN blindly.
                 is_active_mode = False
                 participants_count = None
-                await send_alert(user_id, chat_id, f"⚠️ **Check Error:** Could not verify traffic for `{link}`. Safely rescheduling.", priority="LOW")
+                await send_alert(user_id, chat_id, f"⚠️ **Check Error:** Could not verify traffic for `{link}`. Reason: {e}. Safely rescheduling.", priority="LOW")
 
             if is_active_mode:
                 data["active_links_count"] += 1
@@ -2479,28 +2486,28 @@ async def runner_engine(user_id: int, chat_id: int):
                 if N > 1:
                     ideal_gap = next_delay / N
                     scheduled_times = GLOBAL_LINK_SCHEDULES.get(hash_str, [])
-                now = time.time()
-                scheduled_times = [t for t in scheduled_times if t > now]
-            
-                target_time = base_target_time
-                conflict = True
-                max_loops = 50
-                loops = 0
-                while conflict and loops < max_loops:
-                    conflict = False
-                    loops += 1
-                    for st in scheduled_times:
-                        if abs(target_time - st) < ideal_gap:
-                            target_time = st + ideal_gap
-                            conflict = True
-                            break
-            
-                scheduled_times.append(target_time)
-                GLOBAL_LINK_SCHEDULES[hash_str] = scheduled_times
-            
-                actual_delay = int(target_time - time.time())
+                    now = time.time()
+                    scheduled_times = [t for t in scheduled_times if t > now]
+                
+                    target_time = base_target_time
+                    conflict = True
+                    max_loops = 50
+                    loops = 0
+                    while conflict and loops < max_loops:
+                        conflict = False
+                        loops += 1
+                        for st in scheduled_times:
+                            if abs(target_time - st) < ideal_gap:
+                                target_time = st + ideal_gap
+                                conflict = True
+                                break
+                
+                    scheduled_times.append(target_time)
+                    GLOBAL_LINK_SCHEDULES[hash_str] = scheduled_times
+                
+                    actual_delay = int(target_time - time.time())
             # -----------------------
-
+            
             data.setdefault("link_schedule", {})[hash_str] = time.time() + actual_delay
             save_state()
         
