@@ -74,6 +74,7 @@ bot_client = TelegramClient('sessions/control_bot', API_ID, API_HASH)
 user_data = {}
 GLOBAL_LINK_SCHEDULES = {}
 GLOBAL_JOIN_TICKETS = {}
+GLOBAL_SPECTATOR_LOGS = {}
 KNOWN_BOT_IDS = set()
 STATE_FILE = "sessions/state.json"
 
@@ -1366,9 +1367,88 @@ async def callback_handler(event):
         if not hash_to_info:
             msg += "*No links are currently set to Spectator Joiner mode in any of your accounts.*\n"
             
-        keyboard = [[Button.inline("🔄 Refresh Dashboard", b"show_master_dash")],
-                    [Button.inline("🔙 Back to Dashboard", b"back_to_menu")]]
+        keyboard = [
+            [Button.inline("🟢 Live Detection Monitor", b"spectator_live_detection")],
+            [Button.inline("🌐 Network Status (Joiner Fleet)", b"spectator_network_status")],
+            [Button.inline("🔄 Refresh Dashboard", b"show_master_dash")],
+            [Button.inline("🔙 Back to Dashboard", b"back_to_menu")]
+        ]
         
+        await event.edit(msg, buttons=keyboard, link_preview=False)
+        
+    elif cb_data == "spectator_live_detection":
+        msg = f"🟢 **LIVE DETECTION MONITOR**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        has_data = False
+        for h, logs in GLOBAL_SPECTATOR_LOGS.items():
+            has_data = True
+            msg += f"🔗 `{h}`\n"
+            
+            lfj = logs.get("last_foreign_join")
+            if lfj:
+                msg += f"├ **Last Foreign Join:** {time.strftime('%I:%M:%S %p', time.localtime(lfj))}\n"
+            else:
+                msg += f"├ **Last Foreign Join:** Never\n"
+                
+            lfs = logs.get("last_friend_seen")
+            if lfs:
+                msg += f"├ **Friend Account Status:** Visible (Skipped Ticket at {time.strftime('%I:%M:%S %p', time.localtime(lfs))})\n"
+            else:
+                msg += f"├ **Friend Account Status:** Not Detected\n"
+                
+            hjd = logs.get("hidden_joins_detected")
+            if hjd:
+                msg += f"└ 🚨 **Hidden Joins Warning:** YES ({time.strftime('%I:%M:%S %p', time.localtime(hjd))})\n\n"
+            else:
+                msg += f"└ 🚨 **Hidden Joins Warning:** No\n\n"
+                
+        if not has_data:
+            msg += "*No detection events have occurred yet since the server started.*\n"
+            
+        keyboard = [
+            [Button.inline("🔄 Refresh Monitor", b"spectator_live_detection")],
+            [Button.inline("🔙 Back to Master Dashboard", b"show_master_dash")]
+        ]
+        await event.edit(msg, buttons=keyboard, link_preview=False)
+        
+    elif cb_data == "spectator_network_status":
+        msg = f"🌐 **NETWORK STATUS (JOINER FLEET)**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        fleet_data = {}
+        total_joiners = 0
+        
+        for p_id, p_data in user_data.items():
+            is_joiner = False
+            for link in p_data.get("queue", []):
+                h = extract_hash(link)
+                if p_data.get("link_join_modes", {}).get(h) == "SPECTATOR_JOINER":
+                    is_joiner = True
+                    fleet_data.setdefault(h, []).append((p_id, p_data))
+            if is_joiner: total_joiners += 1
+            
+        msg += f"**Total Active Joiner Accounts:** {total_joiners}\n\n"
+        
+        for h, accounts in fleet_data.items():
+            msg += f"🔗 `{h}`\n"
+            msg += f"├ **Assigned Accounts:** {len(accounts)}\n"
+            
+            for (p_id, p_data) in accounts:
+                next_time = p_data.get("next_join_time", 0)
+                time_left = max(0, int(next_time - time.time()))
+                time_str = f"{time_left // 60}m {time_left % 60}s" if time_left > 0 else "Ready / Awaking"
+                if h in p_data.get("stopped_links", []):
+                    time_str = "STOPPED"
+                elif not p_data.get("loop_active"):
+                    time_str = "ENGINE OFF"
+                    
+                msg += f"├ 👤 `...{str(p_id)[-4:]}` -> Next Wake Up: {time_str}\n"
+            msg += f"└ ───────────────────\n\n"
+            
+        if not fleet_data:
+            msg += "*No accounts are currently configured as Joiners.*\n"
+            
+        keyboard = [
+            [Button.inline("🔄 Refresh Network", b"spectator_network_status")],
+            [Button.inline("🔙 Back to Master Dashboard", b"show_master_dash")]
+        ]
         await event.edit(msg, buttons=keyboard, link_preview=False)
         
     elif cb_data.startswith("show_queue"):
@@ -1731,9 +1811,14 @@ async def master_spectator_engine(user_id: int, chat_id: int):
                             if getattr(msg, 'fwd_from', None) or getattr(msg, 'reply_to_msg_id', None): msg_height += 40
                         current_height += msg_height
                         if current_height >= 800: break
-                    if not friend_visible: GLOBAL_JOIN_TICKETS[target_hash] = time.time()
+                    if not friend_visible:
+                        GLOBAL_JOIN_TICKETS[target_hash] = time.time()
+                        GLOBAL_SPECTATOR_LOGS.setdefault(target_hash, {})["last_foreign_join"] = time.time()
+                    else:
+                        GLOBAL_SPECTATOR_LOGS.setdefault(target_hash, {})["last_friend_seen"] = time.time()
                 except Exception:
                     GLOBAL_JOIN_TICKETS[target_hash] = time.time()
+                    GLOBAL_SPECTATOR_LOGS.setdefault(target_hash, {})["last_foreign_join"] = time.time()
         setattr(user_client, "_global_spectator_attached", True)
         
     from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
@@ -1796,7 +1881,7 @@ async def master_spectator_engine(user_id: int, chat_id: int):
                 
                     diff = new_count - m_data["last_count"]
                     if diff >= 3:
-                        recent_msgs = await user_client.get_messages(c_id, limit=50)
+                        recent_msgs = await user_client.get_messages(c_id, limit=15)
                         has_join_msgs = False
                         from telethon.tl.types import MessageActionChatAddUser, MessageActionChatJoinedByLink
                         for msg in recent_msgs:
@@ -1806,6 +1891,7 @@ async def master_spectator_engine(user_id: int, chat_id: int):
                             
                         if not has_join_msgs:
                             target_hash = m_data["hash_str"]
+                            GLOBAL_SPECTATOR_LOGS.setdefault(target_hash, {})["hidden_joins_detected"] = time.time()
                             for u_id, u_data in user_data.items():
                                 if target_hash not in u_data.get("stopped_links", []):
                                     u_data.setdefault("stopped_links", []).append(target_hash)
@@ -1814,11 +1900,16 @@ async def master_spectator_engine(user_id: int, chat_id: int):
                             await send_alert(user_id, chat_id, f"🚨 **Hidden Joins Detected!**\nGroup `{target_hash}` grew by {diff} users but 0 join messages were found. Admins are hiding joins! Link has been **AUTO-STOPPED** globally.", priority="CRITICAL")
                             del monitored_chats[c_id]
                             continue
+                        else:
+                            # Genuine traffic detected by fallback loop (ChatAction event missed it)
+                            target_hash = m_data["hash_str"]
+                            GLOBAL_JOIN_TICKETS[target_hash] = time.time()
+                            GLOBAL_SPECTATOR_LOGS.setdefault(target_hash, {})["last_foreign_join"] = time.time()
                         
                     m_data["last_count"] = new_count
                 except Exception: pass
                 
-            for _ in range(60):
+            for _ in range(100):
                 if not data["loop_active"]: break
                 await asyncio.sleep(1)
         except Exception as e:
@@ -2009,6 +2100,11 @@ async def runner_engine(user_id: int, chat_id: int):
                     from telethon.tl.functions.channels import GetFullChannelRequest
                     entity = await user_client.get_entity(hash_str)
                     full_chat_req = await user_client(GetFullChannelRequest(entity))
+                    
+                    try:
+                        p_list = await user_client.get_participants(entity, limit=40)
+                    except Exception as e:
+                        p_list = []
                 
                     class PublicGroupMock:
                         def __init__(self, count, title, chat, participants):
@@ -2021,14 +2117,9 @@ async def runner_engine(user_id: int, chat_id: int):
                         full_chat_req.full_chat.participants_count,
                         entity.title,
                         entity,
-                        []
+                        p_list
                     )
                     is_public_group = True
-                
-                    # Public groups do not return users in chronological order.
-                    # Do NOT attempt to check recent joiners for spam, as it will think genuine new users are fake.
-                    # Rely purely on traffic volume diff.
-                    invite_info.participants = []
             
                 # Record analytics: Intelligent Decay (Rolling Window)
                 # Keeps the grade dynamically shifting based on RECENT traffic
