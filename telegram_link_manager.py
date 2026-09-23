@@ -426,10 +426,11 @@ async def show_menu(chat_id: int, user_id: int, event=None):
         
     if authorized:
         spectator_btn = Button.inline("🛑 Stop Master Spectator", b"toggle_spectator") if data.get("is_spectator_account") else Button.inline("👁️ Make Master Spectator", b"toggle_spectator")
+        queue_btn = Button.inline("👁️ Master Dashboard", b"show_master_dash") if data.get("is_spectator_account") else Button.inline("📊 Live Queue", b"show_queue")
         
         keyboard = [
             [Button.inline("▶️ START ENGINE", b"start_loop"), Button.inline("⏸️ STOP ENGINE", b"stop_loop")],
-            [Button.inline("➕ Add New Link", b"add_link"), Button.inline("📊 Live Queue", b"show_queue")],
+            [Button.inline("➕ Add New Link", b"add_link"), queue_btn],
             [Button.inline("📝 Live Logs", b"show_live_log"), Button.inline("⚙️ Settings & Proxy", b"settings_menu")],
             [Button.inline("🤖 Chat Automation", b"business_menu"), Button.inline("🩺 Live Diagnostics", b"show_diagnostics")],
             [spectator_btn, Button.inline("🚪 Secure Logout", b"logout")]
@@ -1320,6 +1321,35 @@ async def callback_handler(event):
         await event.answer("All proxies cleared!", alert=True)
         event.data = b"proxies_menu"
         await callback_handler(event)
+    elif cb_data == "show_master_dash":
+        required_hashes = set()
+        hash_to_info = {}
+        for u_id, u_data in user_data.items():
+            for link in u_data.get("queue", []):
+                h = extract_hash(link)
+                if h in u_data.get("stopped_links", []):
+                    hash_to_info[h] = {"status": "🛑 STOPPED (Ignored/Hidden Joins)", "link": link}
+                elif u_data.get("link_join_modes", {}).get(h) == "SPECTATOR_JOINER":
+                    required_hashes.add(h)
+                    hash_to_info[h] = {"status": "🟢 ACTIVE (Guarding)", "link": link}
+                    
+        msg = f"👁️ **MASTER SPECTATOR DASHBOARD**\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"**Guard Status:** ACTIVE 🛡️\n"
+        msg += f"**Total Links Guarded:** {len(required_hashes)}\n\n"
+        
+        for h, info in hash_to_info.items():
+            if info["status"] == "🟢 ACTIVE (Guarding)" or info["status"].startswith("🛑 STOPPED"):
+                msg += f"🔗 {info['link']}\n"
+                msg += f"└ Status: {info['status']}\n\n"
+                
+        if not hash_to_info:
+            msg += "*No links are currently set to Spectator Joiner mode in any of your accounts.*\n"
+            
+        keyboard = [[Button.inline("🔄 Refresh Dashboard", b"show_master_dash")],
+                    [Button.inline("🔙 Back to Dashboard", b"back_to_menu")]]
+        
+        await event.edit(msg, buttons=keyboard, link_preview=False)
         
     elif cb_data.startswith("show_queue"):
         if not data["queue"]:
@@ -1690,86 +1720,91 @@ async def master_spectator_engine(user_id: int, chat_id: int):
     from telethon.tl.functions.channels import JoinChannelRequest, GetFullChannelRequest
     
     while data["loop_active"]:
-        required_hashes = set()
-        hash_to_link = {}
-        for u_id, u_data in user_data.items():
-            for link in u_data.get("queue", []):
-                h = extract_hash(link)
-                if h in u_data.get("stopped_links", []): continue
-                if u_data.get("link_join_modes", {}).get(h) == "SPECTATOR_JOINER":
-                    required_hashes.add(h)
-                    hash_to_link[h] = link
+        try:
+            required_hashes = set()
+            hash_to_link = {}
+            for u_id, u_data in user_data.items():
+                for link in u_data.get("queue", []):
+                    h = extract_hash(link)
+                    if h in u_data.get("stopped_links", []): continue
+                    if u_data.get("link_join_modes", {}).get(h) == "SPECTATOR_JOINER":
+                        required_hashes.add(h)
+                        hash_to_link[h] = link
                     
-        for c_id in list(monitored_chats.keys()):
-            if monitored_chats[c_id]["hash_str"] not in required_hashes:
-                del monitored_chats[c_id]
+            for c_id in list(monitored_chats.keys()):
+                if monitored_chats[c_id]["hash_str"] not in required_hashes:
+                    del monitored_chats[c_id]
                 
-        current_hashes = {m["hash_str"] for m in monitored_chats.values()}
-        for h in required_hashes:
-            if not data["loop_active"]: break
-            if h not in current_hashes:
-                link = hash_to_link[h]
-                try:
-                    chat_id = None
-                    last_count = 0
-                    is_public = False
-                    if '+' not in link and 'joinchat' not in link: is_public = True
-                    if is_public:
-                        entity = await user_client.get_entity(h)
-                        try: await user_client(JoinChannelRequest(entity))
-                        except Exception: pass
-                        chat_id = entity.id
-                        full = await user_client(GetFullChannelRequest(entity))
-                        last_count = full.full_chat.participants_count or 0
-                    else:
-                        try:
-                            invite = await user_client(CheckChatInviteRequest(h))
-                            chat_id = invite.chat.id
-                            last_count = getattr(invite.chat, 'participants_count', 0)
-                            try: await user_client(ImportChatInviteRequest(h))
+            current_hashes = {m["hash_str"] for m in monitored_chats.values()}
+            for h in required_hashes:
+                if not data["loop_active"]: break
+                if h not in current_hashes:
+                    link = hash_to_link[h]
+                    try:
+                        chat_id = None
+                        last_count = 0
+                        is_public = False
+                        if '+' not in link and 'joinchat' not in link: is_public = True
+                        if is_public:
+                            entity = await user_client.get_entity(h)
+                            try: await user_client(JoinChannelRequest(entity))
                             except Exception: pass
-                        except Exception: pass
+                            chat_id = entity.id
+                            full = await user_client(GetFullChannelRequest(entity))
+                            last_count = full.full_chat.participants_count or 0
+                        else:
+                            try:
+                                invite = await user_client(CheckChatInviteRequest(h))
+                                chat_id = invite.chat.id
+                                last_count = getattr(invite.chat, 'participants_count', 0)
+                                try: await user_client(ImportChatInviteRequest(h))
+                                except Exception: pass
+                            except Exception: pass
                             
-                    if chat_id:
-                        monitored_chats[chat_id] = {"hash_str": h, "last_count": last_count}
-                        await send_alert(user_id, chat_id, f"👁️ **Master Spectator:** Attached to `{link}`", priority="LOW")
-                except Exception as e:
-                    logger.error(f"Master Spectator failed to attach to {h}: {e}")
+                        if chat_id:
+                            monitored_chats[chat_id] = {"hash_str": h, "last_count": last_count}
+                            await send_alert(user_id, chat_id, f"👁️ **Master Spectator:** Attached to `{link}`", priority="LOW")
+                    except Exception as e:
+                        logger.error(f"Master Spectator failed to attach to {h}: {e}")
                     
-        for c_id, m_data in list(monitored_chats.items()):
-            if not data["loop_active"]: break
-            try:
-                entity = await user_client.get_entity(c_id)
-                full = await user_client(GetFullChannelRequest(entity))
-                new_count = full.full_chat.participants_count or 0
+            for c_id, m_data in list(monitored_chats.items()):
+                if not data["loop_active"]: break
+                try:
+                    entity = await user_client.get_entity(c_id)
+                    full = await user_client(GetFullChannelRequest(entity))
+                    new_count = full.full_chat.participants_count or 0
                 
-                diff = new_count - m_data["last_count"]
-                if diff >= 3:
-                    recent_msgs = await user_client.get_messages(c_id, limit=50)
-                    has_join_msgs = False
-                    from telethon.tl.types import MessageActionChatAddUser, MessageActionChatJoinedByLink
-                    for msg in recent_msgs:
-                        if getattr(msg, 'action', None) and isinstance(msg.action, (MessageActionChatAddUser, MessageActionChatJoinedByLink)):
-                            has_join_msgs = True
-                            break
+                    diff = new_count - m_data["last_count"]
+                    if diff >= 3:
+                        recent_msgs = await user_client.get_messages(c_id, limit=50)
+                        has_join_msgs = False
+                        from telethon.tl.types import MessageActionChatAddUser, MessageActionChatJoinedByLink
+                        for msg in recent_msgs:
+                            if getattr(msg, 'action', None) and isinstance(msg.action, (MessageActionChatAddUser, MessageActionChatJoinedByLink)):
+                                has_join_msgs = True
+                                break
                             
-                    if not has_join_msgs:
-                        target_hash = m_data["hash_str"]
-                        for u_id, u_data in user_data.items():
-                            if target_hash not in u_data.get("stopped_links", []):
-                                u_data.setdefault("stopped_links", []).append(target_hash)
-                        save_state()
+                        if not has_join_msgs:
+                            target_hash = m_data["hash_str"]
+                            for u_id, u_data in user_data.items():
+                                if target_hash not in u_data.get("stopped_links", []):
+                                    u_data.setdefault("stopped_links", []).append(target_hash)
+                            save_state()
                         
-                        await send_alert(user_id, chat_id, f"🚨 **Hidden Joins Detected!**\nGroup `{target_hash}` grew by {diff} users but 0 join messages were found. Admins are hiding joins! Link has been **AUTO-STOPPED** globally.", priority="CRITICAL")
-                        del monitored_chats[c_id]
-                        continue
+                            await send_alert(user_id, chat_id, f"🚨 **Hidden Joins Detected!**\nGroup `{target_hash}` grew by {diff} users but 0 join messages were found. Admins are hiding joins! Link has been **AUTO-STOPPED** globally.", priority="CRITICAL")
+                            del monitored_chats[c_id]
+                            continue
                         
-                m_data["last_count"] = new_count
-            except Exception: pass
+                    m_data["last_count"] = new_count
+                except Exception: pass
                 
-        for _ in range(60):
-            if not data["loop_active"]: break
-            await asyncio.sleep(1)
+            for _ in range(60):
+                if not data["loop_active"]: break
+                await asyncio.sleep(1)
+        except Exception as e:
+            logger.error(f"Fatal loop error in master spectator engine: {e}")
+            await asyncio.sleep(10)
+            continue
 
 async def runner_engine(user_id: int, chat_id: int):
     data = get_user_data(user_id)
@@ -1777,708 +1812,716 @@ async def runner_engine(user_id: int, chat_id: int):
         return await master_spectator_engine(user_id, chat_id)
         
     while True:
-        if not data["loop_active"] or not data["queue"]:
-            if not data["loop_active"]:
-                break
-            await asyncio.sleep(5)
-            continue
-            
-        user_client = data.get("client")
-        if user_client is None:
-            has_string = bool(data.get("session_string"))
-            
-            if has_string:
-                kwargs = get_client_kwargs(data)
-                
-                if "proxy" in kwargs:
-                    # To display proxy info safely, we check original list since kwargs["proxy"] is a dict
-                    p = kwargs["proxy"]
-                    await send_alert(user_id, chat_id, f"🌐 **Proxy Connected:** Engine started on {p['proxy_type'].upper()} proxy ({p['addr']})")
-                    
-                user_client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, **kwargs)
-                    
-                await user_client.connect()
-                try: 
-                    me = await user_client.get_me() # Sync AuthKey
-                    if me: KNOWN_BOT_IDS.add(me.id)
-                except: pass
-                
-                data["client"] = user_client
-                
-                # Boot Delay (Protect new sessions from instant API requests upon server restarts)
-                uptime = time.time() - data.get("engine_uptime_start", time.time())
-                if uptime < 300:
-                    is_warmup = (time.time() - data.get("first_login_time", 0)) < (3 * 86400)
-                    if is_warmup:
-                        delay_left = 300 - int(uptime)
-                        await send_alert(user_id, chat_id, f"🛡️ **Warmup Protection:** Delaying engine start for {delay_left}s to prevent Telegram anti-spam from flagging your new session.", priority="CRITICAL")
-                        await interruptible_sleep(delay_left, user_id)
-                # Save the session string immediately in case connecting updated the AuthKey or Datacenter
-                data["session_string"] = user_client.session.save()
-                save_state()
-            else:
-                await send_alert(user_id, chat_id, "⚠️ **Session missing.** Please /login again.")
-                data["loop_active"] = False
-                save_state()
-                break
-
-        now = time.time()
-        
-        # PANIC MODE CHECK
-        panic_until = data.get("panic_mode_until", 0)
-        if now < panic_until:
-            wait_sec = int(panic_until - now)
-            # Sleep in chunks to allow interruption
-            chunk = min(wait_sec, 60)
-            if not await interruptible_sleep(chunk, user_id):
-                break
-            continue
-            
-        # SMART MICRO-NAPS (Rush-Hour Aware Stutter Stepping)
-        uptime = now - data.setdefault("engine_uptime_start", now)
-        # Random trigger between 45 to 90 mins (2700 to 5400 seconds)
-        if uptime > random.randint(2700, 5400):
-            # Check Rush Hour override
-            ist = timezone(timedelta(hours=5, minutes=30))
-            now_ist = datetime.now(ist)
-            current_hour_str = str(now_ist.hour)
-            
-            is_rush_hour = False
-            for hash_str, logs in data.get("hour_activity_log", {}).items():
-                total = sum(logs.values())
-                if total >= 5:
-                    hr_joins = logs.get(current_hour_str, 0)
-                    if hr_joins / total >= 0.2:
-                        is_rush_hour = True
-                        break
-                        
-            if is_rush_hour:
-                await send_alert(user_id, chat_id, "🔥 **AI Overdrive:** Canceled scheduled Micro-Nap because it's Rush Hour. Running at 100% capacity!")
-                data["engine_uptime_start"] = now # Reset uptime to check again later
-                save_state()
-            else:
-                nap_sec = random.randint(120, 480) # 2 to 8 mins
-                await send_alert(user_id, chat_id, f"☕ **Micro-Nap Triggered:** Taking a deeply randomized break for {nap_sec // 60}m {nap_sec % 60}s to break API heartbeat...")
-                if not await interruptible_sleep(nap_sec, user_id):
+        try:
+            if not data["loop_active"] or not data["queue"]:
+                if not data["loop_active"]:
                     break
-                data["engine_uptime_start"] = time.time()
-                save_state()
-        
-        # Prevent ghost 24-hour sleeps from old limits locking up the loop
-        if data.get("next_join_time", 0) > now + 2:
-            sleep_left = int(data["next_join_time"] - now)
-            if sleep_left > 7200: # Over 2 hours (likely the old daily limit bug)
-                data["next_join_time"] = 0
-                save_state()
-                await send_alert(user_id, chat_id, "🧹 **Cleared ghost sleep.** Resuming fast loop...")
-            else:
-                if sleep_left > 10:
-                    await send_alert(user_id, chat_id, f"💤 **Resuming Wait:** Sleeping for {sleep_left // 60}m {sleep_left % 60}s before continuing.")
-                if not await interruptible_sleep(0, user_id):
-                    break
-        
-        # Priority Scheduling Logic
-        earliest_link = None
-        earliest_time = float('inf')
-        
-        # Current IST Time
-        ist = timezone(timedelta(hours=5, minutes=30))
-        now_ist = datetime.now(ist)
-        current_hour = now_ist.hour
-        
-        for link in data["queue"]:
-            hash_str = extract_hash(link)
-            if hash_str in data.get("paused_links", []) or hash_str in data.get("stopped_links", []):
+                await asyncio.sleep(5)
                 continue
                 
-            # Check Custom IST Schedule
-            active_hours = data.get("link_active_hours", {}).get(hash_str)
-            if active_hours:
-                start_hr = active_hours["start"]
-                end_hr = active_hours["end"]
-                # Handle overnight ranges like 22 to 6
-                if start_hr < end_hr:
-                    is_active_now = start_hr <= current_hour < end_hr
-                else:
-                    is_active_now = current_hour >= start_hr or current_hour < end_hr
-                if not is_active_now:
-                    continue
+            user_client = data.get("client")
+            if user_client is None:
+                has_string = bool(data.get("session_string"))
+                
+                if has_string:
+                    kwargs = get_client_kwargs(data)
                     
-            # Default to 0 so new links get checked immediately
-            check_time = data.get("link_schedule", {}).get(hash_str, 0)
-            if check_time < earliest_time:
-                earliest_time = check_time
-                earliest_link = link
-                
-        if earliest_link is None:
-            # All links are paused or stopped
-            if not await interruptible_sleep(5, user_id):
-                break
-            continue
-            
-        # If the earliest link is still in the future, we sleep until it's ready
-        if earliest_time > time.time():
-            sleep_needed = int(earliest_time - time.time())
-            # We enforce a max chunk sleep of 30s so the loop can quickly react to Stop commands
-            chunk = min(sleep_needed, 30)
-            if sleep_needed > 30 and chunk == 30:
-                # Only spam the log if it's a long sleep
-                await send_alert(user_id, chat_id, f"💤 **Queue Sleeping:** No links ready. Sleeping for {sleep_needed // 60}m {sleep_needed % 60}s...")
-            if not await interruptible_sleep(chunk, user_id):
-                break
-            continue # Restart the loop to re-evaluate schedules
-                
-        link = earliest_link
-        hash_str = extract_hash(link)
-        
-        # -----------------------------
-        # DYNAMIC TRAFFIC CHECK
-        # -----------------------------
-        is_active_mode = True
-        participants_count = None
-        diff = 0
-        is_high_traffic = False
-        last_count = data.get("link_stats", {}).get(hash_str, 0)
-        
-        try:
-            is_public_group = False
-            try:
-                invite_info = await user_client(CheckChatInviteRequest(hash_str))
-            except Exception as e:
-                # Fallback for public groups
-                from telethon.tl.functions.channels import GetFullChannelRequest
-                entity = await user_client.get_entity(hash_str)
-                full_chat_req = await user_client(GetFullChannelRequest(entity))
-                
-                class PublicGroupMock:
-                    def __init__(self, count, title, chat, participants):
-                        self.participants_count = count
-                        self.title = title
-                        self.chat = chat
-                        self.participants = participants
-                
-                invite_info = PublicGroupMock(
-                    full_chat_req.full_chat.participants_count,
-                    entity.title,
-                    entity,
-                    []
-                )
-                is_public_group = True
-                
-                try:
-                    participants_list = await user_client.get_participants(entity, limit=50)
-                    invite_info.participants = participants_list
-                except:
-                    pass
-            
-            # Record analytics: Intelligent Decay (Rolling Window)
-            # Keeps the grade dynamically shifting based on RECENT traffic
-            perf = data.setdefault("link_performance", {}).setdefault(hash_str, {"checks": 0, "joins": 0})
-            
-            # Absolute non-decaying tracking for user display
-            perf["total_checks"] = perf.get("total_checks", int(perf.get("checks", 0))) + 1
-            
-            current_checks = float(perf.get("checks", 0))
-            current_joins = float(perf.get("joins", 0))
-            
-            if current_checks >= 50:
-                current_checks *= 0.8
-                current_joins *= 0.8
-                
-            perf["checks"] = round(current_checks + 1, 2)
-            perf["joins"] = round(current_joins, 2)
-            
-            # Extract participants count
-            if hasattr(invite_info, 'participants_count'):
-                participants_count = invite_info.participants_count
-            elif hasattr(invite_info, 'chat') and hasattr(invite_info.chat, 'participants_count'):
-                participants_count = invite_info.chat.participants_count
-                
-            # Cache Title
-            if hasattr(invite_info, 'title'):
-                data.setdefault("link_titles", {})[hash_str] = invite_info.title
-            elif hasattr(invite_info, 'chat') and hasattr(invite_info.chat, 'title'):
-                data.setdefault("link_titles", {})[hash_str] = invite_info.chat.title
-            elif hash_str not in data.get("link_titles", {}):
-                data.setdefault("link_titles", {})[hash_str] = "Unknown Group"
-            
-            recent_ids = []
-            new_unique_users = 0
-            genuine_new_users_at_top = 0
-            provided_participants = False
-            if hasattr(invite_info, 'participants') and invite_info.participants:
-                provided_participants = True
-                seen_users = data.get("link_seen_users", {}).get(hash_str, [])
-                global_blacklist = data.setdefault("global_blacklist", [])
-                global_seen = data.setdefault("global_seen_users", {})
-                
-                for i, p in enumerate(invite_info.participants):
-                    # Hive Mind Spam Check
-                    if p.id in global_blacklist or p.id in GLOBAL_SPAMMERS:
-                        continue # Completely ignore blacklisted user
+                    if "proxy" in kwargs:
+                        p = kwargs["proxy"]
+                        await send_alert(user_id, chat_id, f"🌐 **Proxy Connected:** Engine started on {p['proxy_type'].upper()} proxy ({p['addr']})")
                         
-                    # Track globally
-                    user_groups = global_seen.setdefault(str(p.id), [])
-                    if hash_str not in user_groups:
-                        user_groups.append(hash_str)
-                        if len(user_groups) >= 3:
-                            global_blacklist.append(p.id)
-                            if p.id not in GLOBAL_SPAMMERS:
-                                GLOBAL_SPAMMERS.add(p.id)
-                                if spam_collection is not None:
-                                    asyncio.create_task(spam_collection.update_one(
-                                        {"_id": "global_blacklist"},
-                                        {"$addToSet": {"user_ids": p.id}},
-                                        upsert=True
-                                    ))
-                            continue # Ignore this user, they are a spammer
-                            
-                    recent_ids.append(p.id)
-                    if p.id not in seen_users:
-                        new_unique_users += 1
-                        # Next-Level Intelligence: Positional Indexing
-                        # If the new user is in the top 50, they are a genuine recent joiner.
-                        # If they are hiding at index 150+, it's a Telegram API Shuffle ghost join.
-                        if i < 50:
-                            genuine_new_users_at_top += 1
-            
-            if participants_count is not None:
-                # High Traffic Logic
-                is_high_traffic = data.get("high_traffic_links", {}).get(hash_str, 0) > time.time() - 300 # Valid for 5 mins
-                
-                current_mode = data.get("link_join_modes", {}).get(hash_str, "DEFAULT")
-                last_action_time = data.get("link_last_action", {}).get(hash_str, 0)
-                
-                if current_mode == "SPECTATOR_JOINER" and last_count > 0:
-                    ticket_time = GLOBAL_JOIN_TICKETS.get(hash_str, 0)
-                    if ticket_time > last_action_time:
-                        # Consume ticket
-                        GLOBAL_JOIN_TICKETS[hash_str] = 0
-                        is_active_mode = True
-                        diff = 1
-                        await send_alert(user_id, chat_id, f"🚀 **Spectator Ticket Consumed:** Foreign join detected by monitor for `{link}`. Engaging!", priority="HIGH")
-                    else:
-                        is_active_mode = False
-                        await send_alert(user_id, chat_id, f"📉 **Joiner Pool:** No tickets available for `{link}`. Sleeping.", priority="LOW")
-                elif last_count > 0:
-                    time_since_last_action = time.time() - last_action_time
-                    diff = participants_count - last_count
-                    
-                    if diff >= 10:
-                        if provided_participants and genuine_new_users_at_top == 0:
-                            is_active_mode = False
-                            await send_alert(user_id, chat_id, f"📉 **Passive Mode (Spam Filter):** Ignored {diff} joins in `{link}` because they were all repeat spammers.", priority="LOW")
-                        else:
-                            is_active_mode = True
-                            data.setdefault("high_traffic_links", {})[hash_str] = time.time()
-                            await send_alert(user_id, chat_id, f"🔥 **Active Mode (High Traffic):** {diff} new users joined `{link}`. Engaging!", priority="HIGH")
-                    elif genuine_new_users_at_top > 0 or (diff >= 1 and not provided_participants):
-                        if is_high_traffic:
-                            is_active_mode = False
-                            await send_alert(user_id, chat_id, f"⏳ **Passive Mode (Throttling):** Genuine new users detected in `{link}`, waiting for 10 users because group is High Traffic.")
-                        else:
-                            is_active_mode = True
-                            await send_alert(user_id, chat_id, f"🔥 **Active Mode:** Genuine new users detected in `{link}`. Engaging!")
-                    else:
-                        is_active_mode = False
-                        if diff > 0:
-                            await send_alert(user_id, chat_id, f"📉 **Passive Mode (Spam Filter):** Ignored {diff} joins in `{link}` because they were all repeat spammers.", priority="LOW")
-                        else:
-                            await send_alert(user_id, chat_id, f"📉 **Passive Mode:** No new users detected in `{link}`. Skipping join.", priority="LOW")
-                else:
-                    # First time checking
-                    is_active_mode = False
-                    
-                    # Establish baseline without taking action
-                    data["link_stats"][hash_str] = participants_count
-                    if len(recent_ids) > 0:
-                        current_seen = data.get("link_seen_users", {}).get(hash_str, [])
-                        for rid in recent_ids:
-                            if rid in current_seen:
-                                current_seen.remove(rid)
-                            current_seen.append(rid)
-                        data.setdefault("link_seen_users", {})[hash_str] = current_seen[-200:]
-                    data.setdefault("link_last_action", {})[hash_str] = time.time()
-                    save_state()
-                    
-                    await send_alert(user_id, chat_id, f"👀 **Scanning Mode:** First time checking `{link}` ({participants_count} members). Establishing baseline without joining.", priority="NORMAL")
-                
-                # Update stats ONLY when we actually take action
-                if is_active_mode:
-                    data["link_stats"][hash_str] = participants_count
-                    if len(recent_ids) > 0:
-                        current_seen = data.get("link_seen_users", {}).get(hash_str, [])
-                        for rid in recent_ids:
-                            if rid in current_seen:
-                                current_seen.remove(rid)
-                            current_seen.append(rid)
-                        data.setdefault("link_seen_users", {})[hash_str] = current_seen[-200:]
-                    data.setdefault("link_last_action", {})[hash_str] = time.time()
-                    save_state()
-        except Exception as e:
-            # FIX: If we can't check it (network glitch, etc), DO NOT JOIN blindly.
-            is_active_mode = False
-            participants_count = None
-            await send_alert(user_id, chat_id, f"⚠️ **Check Error:** Could not verify traffic for `{link}`. Safely rescheduling.", priority="LOW")
-
-        if is_active_mode:
-            data["active_links_count"] += 1
-            # Step A: Pre-Action Delay (Prevent Telegram Anti-Spam)
-            if not data.get("first_join_done"):
-                delay = random.randint(2, 5)
-                data["first_join_done"] = True
-                save_state()
-            else:
-                delay = random.randint(5, 15)
-                
-            if not await interruptible_sleep(delay, user_id):
-                break
-                
-            try:
-                if is_public_group:
-                    from telethon.tl.functions.channels import JoinChannelRequest
-                    updates = await user_client(JoinChannelRequest(invite_info.chat))
-                else:
-                    updates = await user_client(ImportChatInviteRequest(hash_str))
-                
-                if hasattr(updates, 'chats') and updates.chats:
-                    joined_chat_id = updates.chats[0].id
-                else:
-                    joined_chat_id = invite_info.chat.id if is_public_group else None
-                    if not joined_chat_id:
-                        raise Exception("Could not resolve Chat ID from the join request updates.")
-                
-                data["daily_joins"].append(time.time())
-                
-                # Record analytics: 1 Join
-                perf = data.setdefault("link_performance", {}).setdefault(hash_str, {"checks": 0, "joins": 0})
-                
-                # Absolute non-decaying tracking for user display
-                perf["total_joins"] = perf.get("total_joins", int(perf.get("joins", 0))) + 1
-                
-                perf["joins"] = round(float(perf.get("joins", 0)) + 1, 2)
-                
-                # RESURRECTION FROM HIBERNATION
-                if hash_str in data.get("hibernating_links", []):
-                    data["hibernating_links"].remove(hash_str)
-                    perf["checks"] = 0 # Reset checks so grade is back to 🆕
-                    perf["joins"] = 0
-                    await send_alert(user_id, chat_id, f"🎉 **RESURRECTED:** `{link}` was dead but just got traffic! Removing from Hibernation and pushing to Active Queue!", priority="HIGH")
-                    
-                # Peak Hour AI Recording & Intelligent Decay
-                current_hour = str(datetime.now(timezone(timedelta(hours=5, minutes=30))).hour)
-                hour_log = data.setdefault("hour_activity_log", {}).setdefault(hash_str, {})
-                
-                # If total joins recorded exceed 50, decay all hours by 10% to let new patterns take over
-                if sum(hour_log.values()) > 50:
-                    for h in hour_log:
-                        hour_log[h] = round(float(hour_log[h]) * 0.9, 2)
+                    user_client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, **kwargs)
                         
-                hour_log[current_hour] = round(float(hour_log.get(current_hour, 0)) + 1, 2)
-                
-                save_state()
-                
-                # Step C: The Stay Simulation (Deep Human Emulation)
-                if (participants_count and participants_count > 10000) or diff > 5:
-                    stay_delay = random.randint(120, 300) # 2-5 mins
-                elif (participants_count and participants_count > 1000) or diff > 0:
-                    stay_delay = random.randint(30, 60) # 30-60s
-                else:
-                    stay_delay = random.randint(5, 15) # Dead group, leave fast
-                
-                # Sleep half the stay duration
-                half_delay = stay_delay // 2
-                if not await interruptible_sleep(half_delay, user_id):
-                    break
-                    
-                # BANDWIDTH OPTIMIZED: GHOST TYPING EMULATION ONLY
-                try:
-                    # 50% chance to simulate typing (uses almost zero data)
-                    if random.random() > 0.5:
-                        async with user_client.action(joined_chat_id, 'typing'):
-                            await interruptible_sleep(random.randint(2, 4), user_id)
-                except Exception:
-                    pass # Ignore read/typing errors, we are just pretending
-                    
-                # Sleep the remaining duration
-                rem_delay = stay_delay - half_delay
-                if not await interruptible_sleep(rem_delay, user_id):
-                    break
-                    
-                if current_mode == "SPECTATOR_MONITOR":
-                    handler_name = f"_spectator_{joined_chat_id}"
-                    if not getattr(user_client, handler_name, False):
-                        @user_client.on(events.ChatAction(chats=[joined_chat_id]))
-                        async def spectator_handler(event):
-                            if event.user_joined or event.user_added:
-                                if event.user_id in KNOWN_BOT_IDS:
-                                    return
-                                    
-                                # Screen Visibility Check (Dynamic Height Calculation)
-                                try:
-                                    # Fetch more messages to ensure we can calculate screen overflow
-                                    recent_msgs = await event.client.get_messages(event.chat_id, limit=30)
-                                    friend_visible = False
-                                    
-                                    # Standard mobile screen height is roughly 800 arbitrary "units"
-                                    MAX_SCREEN_HEIGHT = 800
-                                    current_height = 0
-                                    
-                                    for msg in recent_msgs:
-                                        # Estimate message height
-                                        msg_height = 40 # Base height for any message (name, padding)
-                                        
-                                        if getattr(msg, 'action', None):
-                                            # Service messages (like joins/leaves) are very small
-                                            msg_height = 30
-                                            
-                                            # Account for users using long names or invisible characters to push chat up
-                                            if hasattr(msg, 'sender') and msg.sender:
-                                                name_len = len(getattr(msg.sender, 'first_name', '') or '') + len(getattr(msg.sender, 'last_name', '') or '')
-                                                msg_height += (name_len // 40) * 20
-                                                
-                                            if hasattr(msg.action, 'users'):
-                                                if msg.sender_id in KNOWN_BOT_IDS:
-                                                    friend_visible = True
-                                                    break
-                                        else:
-                                            # Text messages: add height based on length (wrap)
-                                            if msg.text:
-                                                # roughly 20 units per 40 characters
-                                                msg_height += (len(msg.text) // 40) * 20
-                                            
-                                            # Media (Photos, Videos, Stickers) take a lot of space
-                                            if msg.media:
-                                                msg_height += 250
-                                                
-                                            # Forwards or Replies add extra header padding
-                                            if getattr(msg, 'fwd_from', None) or getattr(msg, 'reply_to_msg_id', None):
-                                                msg_height += 40
-                                                
-                                        current_height += msg_height
-                                        
-                                        if current_height >= MAX_SCREEN_HEIGHT:
-                                            # Screen is full of other messages, friend is pushed off
-                                            break
-                                            
-                                    if not friend_visible:
-                                        GLOBAL_JOIN_TICKETS[hash_str] = time.time()
-                                except Exception:
-                                    # Fallback
-                                    GLOBAL_JOIN_TICKETS[hash_str] = time.time()
-                        
-                        setattr(user_client, handler_name, True)
-                        await send_alert(user_id, chat_id, f"👁️ **Spectator Mode:** Remained in `{link}` to monitor for foreign joins.", priority="HIGH")
-                else:
-                    try:
-                        from telethon.tl.functions.messages import SendReactionRequest
-                        from telethon.tl.types import ReactionEmoji
-                        me = await user_client.get_me()
-                        my_id = me.id if me else None
-                        async for msg in user_client.iter_messages(joined_chat_id, limit=20):
-                            if getattr(msg, 'action', None) and hasattr(msg.action, 'users'):
-                                if msg.sender_id in KNOWN_BOT_IDS and msg.sender_id != my_id:
-                                    try:
-                                        await user_client(SendReactionRequest(
-                                            peer=joined_chat_id,
-                                            msg_id=msg.id,
-                                            reaction=[ReactionEmoji(emoticon='🔥')]
-                                        ))
-                                    except: pass
+                    await user_client.connect()
+                    try: 
+                        me = await user_client.get_me() # Sync AuthKey
+                        if me: KNOWN_BOT_IDS.add(me.id)
                     except: pass
                     
-                    await user_client.delete_dialog(joined_chat_id)
-                
-            except UserAlreadyParticipantError:
-                await send_alert(user_id, chat_id, f"🧹 Already in `{link}` (likely due to a previous crash). Cleaning up and keeping in queue.", priority="LOW")
-                try:
-                    # Resolve the chat entity and leave to fix the zombie state
-                    invite_info = await user_client(CheckChatInviteRequest(hash_str))
-                    if hasattr(invite_info, 'chat'):
-                        await user_client.delete_dialog(invite_info.chat.id)
-                except Exception:
-                    pass
+                    if await user_client.is_user_authorized():
+                        data["client"] = user_client
+                        
+                        # Boot Delay
+                        uptime = time.time() - data.get("engine_uptime_start", time.time())
+                        if uptime < 300:
+                            is_warmup = (time.time() - data.get("first_login_time", 0)) < (3 * 86400)
+                            if is_warmup:
+                                delay_left = 300 - int(uptime)
+                                await send_alert(user_id, chat_id, f"🛡️ **Warmup Protection:** Delaying engine start for {delay_left}s.", priority="CRITICAL")
+                                await interruptible_sleep(delay_left, user_id)
+                        data["session_string"] = user_client.session.save()
+                        save_state()
+                    else:
+                        await send_alert(user_id, chat_id, "⚠️ **Session missing.** Please /login again.")
+                        data["loop_active"] = False
+                        save_state()
+                        break
+        except Exception as e:
+            logger.error(f"Fatal loop error in engine connection phase for user {user_id}: {e}")
+            await asyncio.sleep(10)
+            continue
+
+        try:
+            now = time.time()
+        
+            # PANIC MODE CHECK
+            panic_until = data.get("panic_mode_until", 0)
+            if now < panic_until:
+                wait_sec = int(panic_until - now)
+                # Sleep in chunks to allow interruption
+                chunk = min(wait_sec, 60)
+                if not await interruptible_sleep(chunk, user_id):
+                    break
                 continue
-                
-            except FloodWaitError as e:
-                # Track flood history for Panic Mode
-                now = time.time()
-                history = data.setdefault("flood_history", [])
-                history.append(now)
-                # Prune > 15 mins
-                history = [t for t in history if now - t < 900]
-                data["flood_history"] = history
-                save_state()
-                
-                if len(history) >= 3:
-                    # Trigger PANIC MODE
-                    data["panic_mode_until"] = now + 7200 # 2 Hours
-                    data["flood_history"] = []
+            
+            # SMART MICRO-NAPS (Rush-Hour Aware Stutter Stepping)
+            uptime = now - data.setdefault("engine_uptime_start", now)
+            # Random trigger between 45 to 90 mins (2700 to 5400 seconds)
+            if uptime > random.randint(2700, 5400):
+                # Check Rush Hour override
+                ist = timezone(timedelta(hours=5, minutes=30))
+                now_ist = datetime.now(ist)
+                current_hour_str = str(now_ist.hour)
+            
+                is_rush_hour = False
+                for hash_str, logs in data.get("hour_activity_log", {}).items():
+                    total = sum(logs.values())
+                    if total >= 5:
+                        hr_joins = logs.get(current_hour_str, 0)
+                        if hr_joins / total >= 0.2:
+                            is_rush_hour = True
+                            break
+                        
+                if is_rush_hour:
+                    await send_alert(user_id, chat_id, "🔥 **AI Overdrive:** Canceled scheduled Micro-Nap because it's Rush Hour. Running at 100% capacity!")
+                    data["engine_uptime_start"] = now # Reset uptime to check again later
                     save_state()
-                    await send_alert(user_id, chat_id, f"🚨 **PANIC MODE ACTIVATED!** Caught 3 API limits in 15 mins. Entire engine is going into Deep Sleep for 2 HOURS to cool down account safety flags.", priority="CRITICAL")
-                    if not await interruptible_sleep(10, user_id): break
+                else:
+                    nap_sec = random.randint(120, 480) # 2 to 8 mins
+                    await send_alert(user_id, chat_id, f"☕ **Micro-Nap Triggered:** Taking a deeply randomized break for {nap_sec // 60}m {nap_sec % 60}s to break API heartbeat...")
+                    if not await interruptible_sleep(nap_sec, user_id):
+                        break
+                    data["engine_uptime_start"] = time.time()
+                    save_state()
+        
+            # Prevent ghost 24-hour sleeps from old limits locking up the loop
+            if data.get("next_join_time", 0) > now + 2:
+                sleep_left = int(data["next_join_time"] - now)
+                if sleep_left > 7200: # Over 2 hours (likely the old daily limit bug)
+                    data["next_join_time"] = 0
+                    save_state()
+                    await send_alert(user_id, chat_id, "🧹 **Cleared ghost sleep.** Resuming fast loop...")
+                else:
+                    if sleep_left > 10:
+                        await send_alert(user_id, chat_id, f"💤 **Resuming Wait:** Sleeping for {sleep_left // 60}m {sleep_left % 60}s before continuing.")
+                    if not await interruptible_sleep(0, user_id):
+                        break
+        
+            # Priority Scheduling Logic
+            earliest_link = None
+            earliest_time = float('inf')
+        
+            # Current IST Time
+            ist = timezone(timedelta(hours=5, minutes=30))
+            now_ist = datetime.now(ist)
+            current_hour = now_ist.hour
+        
+            for link in data["queue"]:
+                hash_str = extract_hash(link)
+                if hash_str in data.get("paused_links", []) or hash_str in data.get("stopped_links", []):
                     continue
+                
+                # Check Custom IST Schedule
+                active_hours = data.get("link_active_hours", {}).get(hash_str)
+                if active_hours:
+                    start_hr = active_hours["start"]
+                    end_hr = active_hours["end"]
+                    # Handle overnight ranges like 22 to 6
+                    if start_hr < end_hr:
+                        is_active_now = start_hr <= current_hour < end_hr
+                    else:
+                        is_active_now = current_hour >= start_hr or current_hour < end_hr
+                    if not is_active_now:
+                        continue
                     
-                sleep_time = e.seconds + 30
-                await send_alert(user_id, chat_id, f"🚨 **FloodWaitError Caught!** Telegram asked to wait {e.seconds}s. Sleeping for {sleep_time} seconds before resuming...")
-                if not await interruptible_sleep(sleep_time, user_id):
+                # Default to 0 so new links get checked immediately
+                check_time = data.get("link_schedule", {}).get(hash_str, 0)
+                if check_time < earliest_time:
+                    earliest_time = check_time
+                    earliest_link = link
+                
+            if earliest_link is None:
+                # All links are paused or stopped
+                if not await interruptible_sleep(5, user_id):
+                    break
+                continue
+            
+            # If the earliest link is still in the future, we sleep until it's ready
+            if earliest_time > time.time():
+                sleep_needed = int(earliest_time - time.time())
+                # We enforce a max chunk sleep of 30s so the loop can quickly react to Stop commands
+                chunk = min(sleep_needed, 30)
+                if sleep_needed > 30 and chunk == 30:
+                    # Only spam the log if it's a long sleep
+                    await send_alert(user_id, chat_id, f"💤 **Queue Sleeping:** No links ready. Sleeping for {sleep_needed // 60}m {sleep_needed % 60}s...")
+                if not await interruptible_sleep(chunk, user_id):
+                    break
+                continue # Restart the loop to re-evaluate schedules
+                
+            link = earliest_link
+            hash_str = extract_hash(link)
+        
+            # -----------------------------
+            # DYNAMIC TRAFFIC CHECK
+            # -----------------------------
+            is_active_mode = True
+            participants_count = None
+            diff = 0
+            is_high_traffic = False
+            last_count = data.get("link_stats", {}).get(hash_str, 0)
+        
+            try:
+                is_public_group = False
+                try:
+                    invite_info = await user_client(CheckChatInviteRequest(hash_str))
+                except Exception as e:
+                    # Fallback for public groups
+                    from telethon.tl.functions.channels import GetFullChannelRequest
+                    entity = await user_client.get_entity(hash_str)
+                    full_chat_req = await user_client(GetFullChannelRequest(entity))
+                
+                    class PublicGroupMock:
+                        def __init__(self, count, title, chat, participants):
+                            self.participants_count = count
+                            self.title = title
+                            self.chat = chat
+                            self.participants = participants
+                
+                    invite_info = PublicGroupMock(
+                        full_chat_req.full_chat.participants_count,
+                        entity.title,
+                        entity,
+                        []
+                    )
+                    is_public_group = True
+                
+                    # Public groups do not return users in chronological order.
+                    # Do NOT attempt to check recent joiners for spam, as it will think genuine new users are fake.
+                    # Rely purely on traffic volume diff.
+                    invite_info.participants = []
+            
+                # Record analytics: Intelligent Decay (Rolling Window)
+                # Keeps the grade dynamically shifting based on RECENT traffic
+                perf = data.setdefault("link_performance", {}).setdefault(hash_str, {"checks": 0, "joins": 0})
+            
+                # Absolute non-decaying tracking for user display
+                perf["total_checks"] = perf.get("total_checks", int(perf.get("checks", 0))) + 1
+            
+                current_checks = float(perf.get("checks", 0))
+                current_joins = float(perf.get("joins", 0))
+            
+                if current_checks >= 50:
+                    current_checks *= 0.8
+                    current_joins *= 0.8
+                
+                perf["checks"] = round(current_checks + 1, 2)
+                perf["joins"] = round(current_joins, 2)
+            
+                # Extract participants count
+                if hasattr(invite_info, 'participants_count'):
+                    participants_count = invite_info.participants_count
+                elif hasattr(invite_info, 'chat') and hasattr(invite_info.chat, 'participants_count'):
+                    participants_count = invite_info.chat.participants_count
+                
+                # Cache Title
+                if hasattr(invite_info, 'title'):
+                    data.setdefault("link_titles", {})[hash_str] = invite_info.title
+                elif hasattr(invite_info, 'chat') and hasattr(invite_info.chat, 'title'):
+                    data.setdefault("link_titles", {})[hash_str] = invite_info.chat.title
+                elif hash_str not in data.get("link_titles", {}):
+                    data.setdefault("link_titles", {})[hash_str] = "Unknown Group"
+            
+                recent_ids = []
+                new_unique_users = 0
+                genuine_new_users_at_top = 0
+                provided_participants = False
+                if hasattr(invite_info, 'participants') and invite_info.participants:
+                    provided_participants = True
+                    seen_users = data.get("link_seen_users", {}).get(hash_str, [])
+                    global_blacklist = data.setdefault("global_blacklist", [])
+                    global_seen = data.setdefault("global_seen_users", {})
+                
+                    for i, p in enumerate(invite_info.participants):
+                        # Hive Mind Spam Check
+                        if p.id in global_blacklist or p.id in GLOBAL_SPAMMERS:
+                            continue # Completely ignore blacklisted user
+                        
+                        # Track globally
+                        user_groups = global_seen.setdefault(str(p.id), [])
+                        if hash_str not in user_groups:
+                            user_groups.append(hash_str)
+                            if len(user_groups) >= 3:
+                                global_blacklist.append(p.id)
+                                if p.id not in GLOBAL_SPAMMERS:
+                                    GLOBAL_SPAMMERS.add(p.id)
+                                    if spam_collection is not None:
+                                        asyncio.create_task(spam_collection.update_one(
+                                            {"_id": "global_blacklist"},
+                                            {"$addToSet": {"user_ids": p.id}},
+                                            upsert=True
+                                        ))
+                                continue # Ignore this user, they are a spammer
+                            
+                        recent_ids.append(p.id)
+                        if p.id not in seen_users:
+                            new_unique_users += 1
+                            # Next-Level Intelligence: Positional Indexing
+                            # If the new user is in the top 50, they are a genuine recent joiner.
+                            # If they are hiding at index 150+, it's a Telegram API Shuffle ghost join.
+                            if i < 50:
+                                genuine_new_users_at_top += 1
+            
+                if participants_count is not None:
+                    # High Traffic Logic
+                    is_high_traffic = data.get("high_traffic_links", {}).get(hash_str, 0) > time.time() - 300 # Valid for 5 mins
+                
+                    current_mode = data.get("link_join_modes", {}).get(hash_str, "DEFAULT")
+                    last_action_time = data.get("link_last_action", {}).get(hash_str, 0)
+                
+                    if current_mode == "SPECTATOR_JOINER" and last_count > 0:
+                        ticket_time = GLOBAL_JOIN_TICKETS.get(hash_str, 0)
+                        if ticket_time > last_action_time:
+                            # Consume ticket
+                            GLOBAL_JOIN_TICKETS[hash_str] = 0
+                            is_active_mode = True
+                            diff = 1
+                            await send_alert(user_id, chat_id, f"🚀 **Spectator Ticket Consumed:** Foreign join detected by monitor for `{link}`. Engaging!", priority="HIGH")
+                        else:
+                            is_active_mode = False
+                            await send_alert(user_id, chat_id, f"📉 **Joiner Pool:** No tickets available for `{link}`. Sleeping.", priority="LOW")
+                    elif last_count > 0:
+                        time_since_last_action = time.time() - last_action_time
+                        diff = participants_count - last_count
+                    
+                        if diff >= 10:
+                            if provided_participants and genuine_new_users_at_top == 0:
+                                is_active_mode = False
+                                await send_alert(user_id, chat_id, f"📉 **Passive Mode (Spam Filter):** Ignored {diff} joins in `{link}` because they were all repeat spammers.", priority="LOW")
+                            else:
+                                is_active_mode = True
+                                data.setdefault("high_traffic_links", {})[hash_str] = time.time()
+                                await send_alert(user_id, chat_id, f"🔥 **Active Mode (High Traffic):** {diff} new users joined `{link}`. Engaging!", priority="HIGH")
+                        elif genuine_new_users_at_top > 0 or (diff >= 1 and not provided_participants):
+                            if is_high_traffic:
+                                is_active_mode = False
+                                await send_alert(user_id, chat_id, f"⏳ **Passive Mode (Throttling):** Genuine new users detected in `{link}`, waiting for 10 users because group is High Traffic.")
+                            else:
+                                is_active_mode = True
+                                await send_alert(user_id, chat_id, f"🔥 **Active Mode:** Genuine new users detected in `{link}`. Engaging!")
+                        else:
+                            is_active_mode = False
+                            if diff > 0:
+                                await send_alert(user_id, chat_id, f"📉 **Passive Mode (Spam Filter):** Ignored {diff} joins in `{link}` because they were all repeat spammers.", priority="LOW")
+                            else:
+                                await send_alert(user_id, chat_id, f"📉 **Passive Mode:** No new users detected in `{link}`. Skipping join.", priority="LOW")
+                    else:
+                        # First time checking
+                        is_active_mode = False
+                    
+                        # Establish baseline without taking action
+                        data["link_stats"][hash_str] = participants_count
+                        if len(recent_ids) > 0:
+                            current_seen = data.get("link_seen_users", {}).get(hash_str, [])
+                            for rid in recent_ids:
+                                if rid in current_seen:
+                                    current_seen.remove(rid)
+                                current_seen.append(rid)
+                            data.setdefault("link_seen_users", {})[hash_str] = current_seen[-200:]
+                        data.setdefault("link_last_action", {})[hash_str] = time.time()
+                        save_state()
+                    
+                        await send_alert(user_id, chat_id, f"👀 **Scanning Mode:** First time checking `{link}` ({participants_count} members). Establishing baseline without joining.", priority="NORMAL")
+                
+                    # Update stats ONLY when we actually take action
+                    if is_active_mode:
+                        data["link_stats"][hash_str] = participants_count
+                        if len(recent_ids) > 0:
+                            current_seen = data.get("link_seen_users", {}).get(hash_str, [])
+                            for rid in recent_ids:
+                                if rid in current_seen:
+                                    current_seen.remove(rid)
+                                current_seen.append(rid)
+                            data.setdefault("link_seen_users", {})[hash_str] = current_seen[-200:]
+                        data.setdefault("link_last_action", {})[hash_str] = time.time()
+                        save_state()
+            except Exception as e:
+                # FIX: If we can't check it (network glitch, etc), DO NOT JOIN blindly.
+                is_active_mode = False
+                participants_count = None
+                await send_alert(user_id, chat_id, f"⚠️ **Check Error:** Could not verify traffic for `{link}`. Safely rescheduling.", priority="LOW")
+
+            if is_active_mode:
+                data["active_links_count"] += 1
+                # Step A: Pre-Action Delay (Prevent Telegram Anti-Spam)
+                if not data.get("first_join_done"):
+                    delay = random.randint(2, 5)
+                    data["first_join_done"] = True
+                    save_state()
+                else:
+                    delay = random.randint(5, 15)
+                
+                if not await interruptible_sleep(delay, user_id):
                     break
                 
-            except Exception as e:
-                await send_alert(user_id, chat_id, f"❌ **Error during join sequence for `{link}`:** {e}")
-                # Don't break, just continue to next link for a long time to prevent tight loop errors
-                data.setdefault("link_schedule", {})[hash_str] = time.time() + 3600 # 1 hour
-                save_state()
-                await interruptible_sleep(10, user_id)
-                continue
-        else:
-            data.setdefault("passive_links_count", 0)
-            data["passive_links_count"] += 1
-        # Check for IST Night Time (1 AM to 5 AM)
-        ist = timezone(timedelta(hours=5, minutes=30))
-        now_ist = datetime.now(ist)
-        is_night_mode = 1 <= now_ist.hour < 5
-
-        # Determine reschedule delay based on diff and active mode
-        
-        # Get link grade performance for intelligent scaling
-        perf = data.get("link_performance", {}).get(hash_str, {"checks": 0, "joins": 0})
-        grade = get_link_grade(perf["checks"], perf["joins"]).split(' ')[0] # 🔥, ⭐, 📈, 📊, 📉, 💀, 🆕
-        
-        # Smart Grade Multiplier (Better grade = faster checks when idle/night)
-        grade_multiplier = 1.0
-        if "🔥" in grade: grade_multiplier = 0.6
-        elif "⭐" in grade: grade_multiplier = 0.8
-        elif "📈" in grade: grade_multiplier = 1.0
-        elif "📊" in grade: grade_multiplier = 1.2
-        elif "📉" in grade or "💀" in grade: grade_multiplier = 1.5
-        
-        # AI Peak Hour Multiplier
-        current_hour_str = str(now_ist.hour)
-        activity_log = data.get("hour_activity_log", {}).get(hash_str, {})
-        total_joins_for_link = sum(activity_log.values())
-        is_peak_hour = False
-        if total_joins_for_link >= 5: # Need enough data to make AI predictions
-            hour_joins = activity_log.get(current_hour_str, 0)
-            ratio = hour_joins / total_joins_for_link
-            if ratio >= 0.2: # Peak hour (>20% of traffic)
-                is_peak_hour = True
-                grade_multiplier *= 0.4 # Speed up massively
-            elif ratio == 0: # Dead hour
-                grade_multiplier *= 1.3 # Slow down
+                try:
+                    if is_public_group:
+                        from telethon.tl.functions.channels import JoinChannelRequest
+                        updates = await user_client(JoinChannelRequest(invite_info.chat))
+                    else:
+                        updates = await user_client(ImportChatInviteRequest(hash_str))
                 
-        if participants_count is None:
-            next_delay = 3600 # 1 hour for errors
-            traffic_str = "❌ Error/Invalid"
-        elif "💀" in grade:
-            # HIBERNATION PROTOCOL
-            next_delay = 86400 # 24 hours
-            traffic_str = "💤 Hibernating (Sonar Ping pending)"
-            if hash_str not in data.setdefault("hibernating_links", []):
-                data["hibernating_links"].append(hash_str)
-                await send_alert(user_id, chat_id, f"🥶 **HIBERNATING `{link}`:** Group is dead (Grade F). Auto-Pausing to save engine power. Will send a Sonar Ping tomorrow.")
-        elif is_night_mode:
-            # Smart Night Mode: Deep sleep, scaled by grade
-            base_night = random.randint(3600, 7200) # 1 to 2 hours
-            next_delay = int(base_night * grade_multiplier)
-            traffic_str = f"🌙 Night Mode ({grade} Smart Delay)"
-        else:
-            # NEXT-LEVEL AI THROTTLING (Grade-Based Focus)
-            if "🔥" in grade: # A+ Viral
-                next_delay = random.randint(120, 300) # 2-5 mins
-                traffic_str = f"🔥 Viral Focus"
-            elif "⭐" in grade: # A Excellent
-                next_delay = random.randint(300, 600) # 5-10 mins
-                traffic_str = f"⭐ Prime Focus"
-            elif "📈" in grade: # B Active
-                next_delay = random.randint(600, 900) # 10-15 mins
-                traffic_str = f"📈 Active Focus"
-            elif "📊" in grade: # C Slow
-                next_delay = random.randint(1800, 2700) # 30-45 mins
-                traffic_str = f"📊 Slow (Saving API Limits)"
-            elif "📉" in grade or "🥱" in grade: # D or E Dead/Spam
-                next_delay = random.randint(3600, 10800) # 1-3 hours! Anti-Ban Protection
-                traffic_str = f"{grade} Dead Group (Anti-Ban Throttling)"
-            else: # 🆕 Init
-                next_delay = random.randint(300, 600) # 5-10 mins (Learn quickly)
-                traffic_str = f"🆕 Scanning Mode"
+                    if hasattr(updates, 'chats') and updates.chats:
+                        joined_chat_id = updates.chats[0].id
+                    else:
+                        joined_chat_id = invite_info.chat.id if is_public_group else None
+                        if not joined_chat_id:
+                            raise Exception("Could not resolve Chat ID from the join request updates.")
                 
-            # APPLY AI MULTIPLIERS
-            next_delay = int(next_delay * grade_multiplier)
-            
-            if is_peak_hour:
-                # Never sleep more than 15 mins during a historical rush hour!
-                next_delay = min(next_delay, 900)
-                traffic_str += " ⚡ (Rush Hour AI Override)"
+                    data["daily_joins"].append(time.time())
                 
-            # Override for absolute Viral spikes (diff >= 10)
-            if is_active_mode and (is_high_traffic or diff >= 10):
-                next_delay = random.randint(60, 180) # 1-3 mins MAX Speed
-                traffic_str = "🚀 VIRAL SPIKE DETECTED (Max Speed)"
-
+                    # Record analytics: 1 Join
+                    perf = data.setdefault("link_performance", {}).setdefault(hash_str, {"checks": 0, "joins": 0})
                 
-        # Ensure session string is always synced with any internal Telethon updates
-        user_client = data.get("client")
-        if user_client:
-            data["session_string"] = user_client.session.save()
-            
-        # ---- STAGGER LOGIC ----
-        base_target_time = time.time() + next_delay
-        actual_delay = next_delay
-        
-        is_isolated = data.get("stagger_mode", "GLOBAL") == "ISOLATED"
-        
-        if not is_isolated:
-            N = 0
-            for uid, udata in user_data.items():
-                if udata.get("loop_active") and udata.get("stagger_mode", "GLOBAL") == "GLOBAL":
-                    for q_link in udata.get("queue", []):
-                        if extract_hash(q_link) == hash_str:
-                            N += 1
-                            break
-                            
-            if N > 1:
-                ideal_gap = next_delay / N
-                scheduled_times = GLOBAL_LINK_SCHEDULES.get(hash_str, [])
-            now = time.time()
-            scheduled_times = [t for t in scheduled_times if t > now]
-            
-            target_time = base_target_time
-            conflict = True
-            max_loops = 50
-            loops = 0
-            while conflict and loops < max_loops:
-                conflict = False
-                loops += 1
-                for st in scheduled_times:
-                    if abs(target_time - st) < ideal_gap:
-                        target_time = st + ideal_gap
-                        conflict = True
+                    # Absolute non-decaying tracking for user display
+                    perf["total_joins"] = perf.get("total_joins", int(perf.get("joins", 0))) + 1
+                
+                    perf["joins"] = round(float(perf.get("joins", 0)) + 1, 2)
+                
+                    # RESURRECTION FROM HIBERNATION
+                    if hash_str in data.get("hibernating_links", []):
+                        data["hibernating_links"].remove(hash_str)
+                        perf["checks"] = 0 # Reset checks so grade is back to 🆕
+                        perf["joins"] = 0
+                        await send_alert(user_id, chat_id, f"🎉 **RESURRECTED:** `{link}` was dead but just got traffic! Removing from Hibernation and pushing to Active Queue!", priority="HIGH")
+                    
+                    # Peak Hour AI Recording & Intelligent Decay
+                    current_hour = str(datetime.now(timezone(timedelta(hours=5, minutes=30))).hour)
+                    hour_log = data.setdefault("hour_activity_log", {}).setdefault(hash_str, {})
+                
+                    # If total joins recorded exceed 50, decay all hours by 10% to let new patterns take over
+                    if sum(hour_log.values()) > 50:
+                        for h in hour_log:
+                            hour_log[h] = round(float(hour_log[h]) * 0.9, 2)
+                        
+                    hour_log[current_hour] = round(float(hour_log.get(current_hour, 0)) + 1, 2)
+                
+                    save_state()
+                
+                    # Step C: The Stay Simulation (Deep Human Emulation)
+                    if (participants_count and participants_count > 10000) or diff > 5:
+                        stay_delay = random.randint(120, 300) # 2-5 mins
+                    elif (participants_count and participants_count > 1000) or diff > 0:
+                        stay_delay = random.randint(30, 60) # 30-60s
+                    else:
+                        stay_delay = random.randint(5, 15) # Dead group, leave fast
+                
+                    # Sleep half the stay duration
+                    half_delay = stay_delay // 2
+                    if not await interruptible_sleep(half_delay, user_id):
                         break
-            
-            scheduled_times.append(target_time)
-            GLOBAL_LINK_SCHEDULES[hash_str] = scheduled_times
-            
-            actual_delay = int(target_time - time.time())
-        # -----------------------
+                    
+                    # BANDWIDTH OPTIMIZED: GHOST TYPING EMULATION ONLY
+                    try:
+                        # 50% chance to simulate typing (uses almost zero data)
+                        if random.random() > 0.5:
+                            async with user_client.action(joined_chat_id, 'typing'):
+                                await interruptible_sleep(random.randint(2, 4), user_id)
+                    except Exception:
+                        pass # Ignore read/typing errors, we are just pretending
+                    
+                    # Sleep the remaining duration
+                    rem_delay = stay_delay - half_delay
+                    if not await interruptible_sleep(rem_delay, user_id):
+                        break
+                    
+                    if current_mode == "SPECTATOR_MONITOR":
+                        handler_name = f"_spectator_{joined_chat_id}"
+                        if not getattr(user_client, handler_name, False):
+                            @user_client.on(events.ChatAction(chats=[joined_chat_id]))
+                            async def spectator_handler(event):
+                                if event.user_joined or event.user_added:
+                                    if event.user_id in KNOWN_BOT_IDS:
+                                        return
+                                    
+                                    # Screen Visibility Check (Dynamic Height Calculation)
+                                    try:
+                                        # Fetch more messages to ensure we can calculate screen overflow
+                                        recent_msgs = await event.client.get_messages(event.chat_id, limit=30)
+                                        friend_visible = False
+                                    
+                                        # Standard mobile screen height is roughly 800 arbitrary "units"
+                                        MAX_SCREEN_HEIGHT = 800
+                                        current_height = 0
+                                    
+                                        for msg in recent_msgs:
+                                            # Estimate message height
+                                            msg_height = 40 # Base height for any message (name, padding)
+                                        
+                                            if getattr(msg, 'action', None):
+                                                # Service messages (like joins/leaves) are very small
+                                                msg_height = 30
+                                            
+                                                # Account for users using long names or invisible characters to push chat up
+                                                if hasattr(msg, 'sender') and msg.sender:
+                                                    name_len = len(getattr(msg.sender, 'first_name', '') or '') + len(getattr(msg.sender, 'last_name', '') or '')
+                                                    msg_height += (name_len // 40) * 20
+                                                
+                                                if hasattr(msg.action, 'users'):
+                                                    if msg.sender_id in KNOWN_BOT_IDS:
+                                                        friend_visible = True
+                                                        break
+                                            else:
+                                                # Text messages: add height based on length (wrap)
+                                                if msg.text:
+                                                    # roughly 20 units per 40 characters
+                                                    msg_height += (len(msg.text) // 40) * 20
+                                            
+                                                # Media (Photos, Videos, Stickers) take a lot of space
+                                                if msg.media:
+                                                    msg_height += 250
+                                                
+                                                # Forwards or Replies add extra header padding
+                                                if getattr(msg, 'fwd_from', None) or getattr(msg, 'reply_to_msg_id', None):
+                                                    msg_height += 40
+                                                
+                                            current_height += msg_height
+                                        
+                                            if current_height >= MAX_SCREEN_HEIGHT:
+                                                # Screen is full of other messages, friend is pushed off
+                                                break
+                                            
+                                        if not friend_visible:
+                                            GLOBAL_JOIN_TICKETS[hash_str] = time.time()
+                                    except Exception:
+                                        # Fallback
+                                        GLOBAL_JOIN_TICKETS[hash_str] = time.time()
+                        
+                            setattr(user_client, handler_name, True)
+                            await send_alert(user_id, chat_id, f"👁️ **Spectator Mode:** Remained in `{link}` to monitor for foreign joins.", priority="HIGH")
+                    else:
+                        try:
+                            from telethon.tl.functions.messages import SendReactionRequest
+                            from telethon.tl.types import ReactionEmoji
+                            me = await user_client.get_me()
+                            my_id = me.id if me else None
+                            async for msg in user_client.iter_messages(joined_chat_id, limit=20):
+                                if getattr(msg, 'action', None) and hasattr(msg.action, 'users'):
+                                    if msg.sender_id in KNOWN_BOT_IDS and msg.sender_id != my_id:
+                                        try:
+                                            await user_client(SendReactionRequest(
+                                                peer=joined_chat_id,
+                                                msg_id=msg.id,
+                                                reaction=[ReactionEmoji(emoticon='🔥')]
+                                            ))
+                                        except: pass
+                        except: pass
+                    
+                        await user_client.delete_dialog(joined_chat_id)
+                
+                except UserAlreadyParticipantError:
+                    await send_alert(user_id, chat_id, f"🧹 Already in `{link}` (likely due to a previous crash). Cleaning up and keeping in queue.", priority="LOW")
+                    try:
+                        # Resolve the chat entity and leave to fix the zombie state
+                        invite_info = await user_client(CheckChatInviteRequest(hash_str))
+                        if hasattr(invite_info, 'chat'):
+                            await user_client.delete_dialog(invite_info.chat.id)
+                    except Exception:
+                        pass
+                    continue
+                
+                except FloodWaitError as e:
+                    # Track flood history for Panic Mode
+                    now = time.time()
+                    history = data.setdefault("flood_history", [])
+                    history.append(now)
+                    # Prune > 15 mins
+                    history = [t for t in history if now - t < 900]
+                    data["flood_history"] = history
+                    save_state()
+                
+                    if len(history) >= 3:
+                        # Trigger PANIC MODE
+                        data["panic_mode_until"] = now + 7200 # 2 Hours
+                        data["flood_history"] = []
+                        save_state()
+                        await send_alert(user_id, chat_id, f"🚨 **PANIC MODE ACTIVATED!** Caught 3 API limits in 15 mins. Entire engine is going into Deep Sleep for 2 HOURS to cool down account safety flags.", priority="CRITICAL")
+                        if not await interruptible_sleep(10, user_id): break
+                        continue
+                    
+                    sleep_time = e.seconds + 30
+                    await send_alert(user_id, chat_id, f"🚨 **FloodWaitError Caught!** Telegram asked to wait {e.seconds}s. Sleeping for {sleep_time} seconds before resuming...")
+                    if not await interruptible_sleep(sleep_time, user_id):
+                        break
+                
+                except Exception as e:
+                    await send_alert(user_id, chat_id, f"❌ **Error during join sequence for `{link}`:** {e}")
+                    # Don't break, just continue to next link for a long time to prevent tight loop errors
+                    data.setdefault("link_schedule", {})[hash_str] = time.time() + 3600 # 1 hour
+                    save_state()
+                    await interruptible_sleep(10, user_id)
+                    continue
+            else:
+                data.setdefault("passive_links_count", 0)
+                data["passive_links_count"] += 1
+            # Check for IST Night Time (1 AM to 5 AM)
+            ist = timezone(timedelta(hours=5, minutes=30))
+            now_ist = datetime.now(ist)
+            is_night_mode = 1 <= now_ist.hour < 5
 
-        data.setdefault("link_schedule", {})[hash_str] = time.time() + actual_delay
-        save_state()
+            # Determine reschedule delay based on diff and active mode
         
-        if participants_count is not None:
-            await send_alert(user_id, chat_id, f"📅 **Rescheduled `{link}`:** ({traffic_str}) Next check in {actual_delay // 60}m {actual_delay % 60}s.", priority="LOW")
-
-        # Minimum global delay to prevent API Anti-Flood Warning from Peeking
-        queue_size = len(data["queue"])
-        if queue_size < 10:
-            anti_flood_delay = random.randint(45, 60) # Force slow loop for tiny queues
-        elif queue_size < 50:
-            anti_flood_delay = random.randint(30, 45)
-        else:
-            anti_flood_delay = random.randint(25, 35) # Fast loop for huge queues
+            # Get link grade performance for intelligent scaling
+            perf = data.get("link_performance", {}).get(hash_str, {"checks": 0, "joins": 0})
+            grade = get_link_grade(perf["checks"], perf["joins"]).split(' ')[0] # 🔥, ⭐, 📈, 📊, 📉, 💀, 🆕
+        
+            # Smart Grade Multiplier (Better grade = faster checks when idle/night)
+            grade_multiplier = 1.0
+            if "🔥" in grade: grade_multiplier = 0.6
+            elif "⭐" in grade: grade_multiplier = 0.8
+            elif "📈" in grade: grade_multiplier = 1.0
+            elif "📊" in grade: grade_multiplier = 1.2
+            elif "📉" in grade or "💀" in grade: grade_multiplier = 1.5
+        
+            # AI Peak Hour Multiplier
+            current_hour_str = str(now_ist.hour)
+            activity_log = data.get("hour_activity_log", {}).get(hash_str, {})
+            total_joins_for_link = sum(activity_log.values())
+            is_peak_hour = False
+            if total_joins_for_link >= 5: # Need enough data to make AI predictions
+                hour_joins = activity_log.get(current_hour_str, 0)
+                ratio = hour_joins / total_joins_for_link
+                if ratio >= 0.2: # Peak hour (>20% of traffic)
+                    is_peak_hour = True
+                    grade_multiplier *= 0.4 # Speed up massively
+                elif ratio == 0: # Dead hour
+                    grade_multiplier *= 1.3 # Slow down
+                
+            if participants_count is None:
+                next_delay = 3600 # 1 hour for errors
+                traffic_str = "❌ Error/Invalid"
+            elif "💀" in grade:
+                # HIBERNATION PROTOCOL
+                next_delay = 86400 # 24 hours
+                traffic_str = "💤 Hibernating (Sonar Ping pending)"
+                if hash_str not in data.setdefault("hibernating_links", []):
+                    data["hibernating_links"].append(hash_str)
+                    await send_alert(user_id, chat_id, f"🥶 **HIBERNATING `{link}`:** Group is dead (Grade F). Auto-Pausing to save engine power. Will send a Sonar Ping tomorrow.")
+            elif is_night_mode:
+                # Smart Night Mode: Deep sleep, scaled by grade
+                base_night = random.randint(3600, 7200) # 1 to 2 hours
+                next_delay = int(base_night * grade_multiplier)
+                traffic_str = f"🌙 Night Mode ({grade} Smart Delay)"
+            else:
+                # NEXT-LEVEL AI THROTTLING (Grade-Based Focus)
+                if "🔥" in grade: # A+ Viral
+                    next_delay = random.randint(120, 300) # 2-5 mins
+                    traffic_str = f"🔥 Viral Focus"
+                elif "⭐" in grade: # A Excellent
+                    next_delay = random.randint(300, 600) # 5-10 mins
+                    traffic_str = f"⭐ Prime Focus"
+                elif "📈" in grade: # B Active
+                    next_delay = random.randint(600, 900) # 10-15 mins
+                    traffic_str = f"📈 Active Focus"
+                elif "📊" in grade: # C Slow
+                    next_delay = random.randint(1800, 2700) # 30-45 mins
+                    traffic_str = f"📊 Slow (Saving API Limits)"
+                elif "📉" in grade or "🥱" in grade: # D or E Dead/Spam
+                    next_delay = random.randint(3600, 10800) # 1-3 hours! Anti-Ban Protection
+                    traffic_str = f"{grade} Dead Group (Anti-Ban Throttling)"
+                else: # 🆕 Init
+                    next_delay = random.randint(300, 600) # 5-10 mins (Learn quickly)
+                    traffic_str = f"🆕 Scanning Mode"
+                
+                # APPLY AI MULTIPLIERS
+                next_delay = int(next_delay * grade_multiplier)
             
-        if not await interruptible_sleep(anti_flood_delay, user_id):
-            break
+                if is_peak_hour:
+                    # Never sleep more than 15 mins during a historical rush hour!
+                    next_delay = min(next_delay, 900)
+                    traffic_str += " ⚡ (Rush Hour AI Override)"
+                
+                # Override for absolute Viral spikes (diff >= 10)
+                if is_active_mode and (is_high_traffic or diff >= 10):
+                    next_delay = random.randint(60, 180) # 1-3 mins MAX Speed
+                    traffic_str = "🚀 VIRAL SPIKE DETECTED (Max Speed)"
+
+                
+            # Ensure session string is always synced with any internal Telethon updates
+            user_client = data.get("client")
+            if user_client:
+                data["session_string"] = user_client.session.save()
+            
+            # ---- STAGGER LOGIC ----
+            base_target_time = time.time() + next_delay
+            actual_delay = next_delay
+        
+            is_isolated = data.get("stagger_mode", "GLOBAL") == "ISOLATED"
+        
+            if not is_isolated:
+                N = 0
+                for uid, udata in user_data.items():
+                    if udata.get("loop_active") and udata.get("stagger_mode", "GLOBAL") == "GLOBAL":
+                        for q_link in udata.get("queue", []):
+                            if extract_hash(q_link) == hash_str:
+                                N += 1
+                                break
+                            
+                if N > 1:
+                    ideal_gap = next_delay / N
+                    scheduled_times = GLOBAL_LINK_SCHEDULES.get(hash_str, [])
+                now = time.time()
+                scheduled_times = [t for t in scheduled_times if t > now]
+            
+                target_time = base_target_time
+                conflict = True
+                max_loops = 50
+                loops = 0
+                while conflict and loops < max_loops:
+                    conflict = False
+                    loops += 1
+                    for st in scheduled_times:
+                        if abs(target_time - st) < ideal_gap:
+                            target_time = st + ideal_gap
+                            conflict = True
+                            break
+            
+                scheduled_times.append(target_time)
+                GLOBAL_LINK_SCHEDULES[hash_str] = scheduled_times
+            
+                actual_delay = int(target_time - time.time())
+            # -----------------------
+
+            data.setdefault("link_schedule", {})[hash_str] = time.time() + actual_delay
+            save_state()
+        
+            if participants_count is not None:
+                await send_alert(user_id, chat_id, f"📅 **Rescheduled `{link}`:** ({traffic_str}) Next check in {actual_delay // 60}m {actual_delay % 60}s.", priority="LOW")
+
+            # Minimum global delay to prevent API Anti-Flood Warning from Peeking
+            queue_size = len(data["queue"])
+            if queue_size < 10:
+                anti_flood_delay = random.randint(45, 60) # Force slow loop for tiny queues
+            elif queue_size < 50:
+                anti_flood_delay = random.randint(30, 45)
+            else:
+                anti_flood_delay = random.randint(25, 35) # Fast loop for huge queues
+            
+            if not await interruptible_sleep(anti_flood_delay, user_id):
+                break
+        except Exception as e:
+            logger.error(f"Fatal loop error in engine execution phase for user {user_id}: {e}")
+            await asyncio.sleep(10)
+            continue
 
 # ==========================================
 # MAIN EXECUTION & DUMMY SERVER
