@@ -361,8 +361,6 @@ def add_live_log(user_id: int, msg: str):
     
     # Clean up multiline messages for the log
     clean_msg = msg.replace('\n', ' ')
-    if len(clean_msg) > 80:
-        clean_msg = clean_msg[:77] + "..."
         
     logs.append(f"`{timestamp}` {clean_msg}")
     if len(logs) > 10:
