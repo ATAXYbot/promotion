@@ -409,10 +409,13 @@ async def show_menu(chat_id: int, user_id: int, event=None):
             kwargs = get_client_kwargs(data)
             save_state()
             client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, **kwargs)
-            await client.connect()
-            try: await client.get_me() # Sync AuthKey globally on Render IP change
-            except: pass
-            
+            try:
+                await asyncio.wait_for(client.connect(), timeout=5.0)
+                try: await asyncio.wait_for(client.get_me(), timeout=5.0) # Sync AuthKey globally on Render IP change
+                except: pass
+            except Exception as e:
+                logger.error(f"Lazy load connection timeout in show_menu: {e}")
+                
             if await client.is_user_authorized():
                 data["client"] = client
             else:
@@ -978,7 +981,22 @@ async def message_handler(event):
                     pass
                 await show_menu(event.chat_id, user_id)
 
+import traceback
+
+def safe_callback(func):
+    async def wrapper(event):
+        try:
+            return await func(event)
+        except Exception as e:
+            logger.error(f"Error in callback_handler: {e}\n{traceback.format_exc()}")
+            try:
+                await event.answer(f"System Error: {e}", alert=True)
+            except:
+                pass
+    return wrapper
+
 @bot_client.on(events.CallbackQuery())
+@safe_callback
 async def callback_handler(event):
     user_id = event.sender_id
     data = get_user_data(user_id)
@@ -989,9 +1007,13 @@ async def callback_handler(event):
         if has_string:
             kwargs = get_client_kwargs(data)
             client = TelegramClient(StringSession(data["session_string"]), API_ID, API_HASH, **kwargs)
-            await client.connect()
-            try: await client.get_me() # Forces Telegram to globally sync the AuthKey on a new Render IP
-            except: pass
+            try:
+                await asyncio.wait_for(client.connect(), timeout=5.0)
+                try: await asyncio.wait_for(client.get_me(), timeout=5.0) # Forces Telegram to globally sync the AuthKey on a new Render IP
+                except: pass
+            except Exception as e:
+                logger.error(f"Lazy load connection timeout in callback_handler: {e}")
+                
             if await client.is_user_authorized():
                 data["client"] = client
             else:
