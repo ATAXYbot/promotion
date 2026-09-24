@@ -1381,6 +1381,7 @@ async def callback_handler(event):
             [Button.inline("🔙 Back to Dashboard", b"back_to_menu")]
         ]
         
+        await event.answer()
         await event.edit(msg, buttons=keyboard, link_preview=False)
         
     elif cb_data == "spectator_live_detection":
@@ -1415,6 +1416,7 @@ async def callback_handler(event):
             [Button.inline("🔄 Refresh Monitor", b"spectator_live_detection")],
             [Button.inline("🔙 Back to Master Dashboard", b"show_master_dash")]
         ]
+        await event.answer()
         await event.edit(msg, buttons=keyboard, link_preview=False)
         
     elif cb_data == "spectator_network_status":
@@ -1456,6 +1458,7 @@ async def callback_handler(event):
             [Button.inline("🔄 Refresh Network", b"spectator_network_status")],
             [Button.inline("🔙 Back to Master Dashboard", b"show_master_dash")]
         ]
+        await event.answer()
         await event.edit(msg, buttons=keyboard, link_preview=False)
         
     elif cb_data.startswith("show_queue"):
@@ -1793,10 +1796,22 @@ async def master_spectator_engine(user_id: int, chat_id: int):
     if not getattr(user_client, "_global_spectator_attached", False):
         @user_client.on(events.ChatAction)
         async def global_spectator_handler(event):
-            if event.chat_id not in monitored_chats: return
+            if not event.chat_id: return
+            
+            c_id = event.chat_id
+            from telethon import utils
+            peer_id = utils.get_peer_id(c_id)
+            
+            target_hash = None
+            if peer_id in monitored_chats:
+                target_hash = monitored_chats[peer_id]["hash_str"]
+            elif c_id in monitored_chats:
+                target_hash = monitored_chats[c_id]["hash_str"]
+                
+            if not target_hash: return
+                
             if event.user_joined or event.user_added:
                 if event.user_id in KNOWN_BOT_IDS: return
-                target_hash = monitored_chats[event.chat_id]["hash_str"]
                 try:
                     recent_msgs = await event.client.get_messages(event.chat_id, limit=30)
                     friend_visible = False
@@ -2318,6 +2333,8 @@ async def runner_engine(user_id: int, chat_id: int):
                                         if getattr(msg, 'action', None) and isinstance(msg.action, (MessageActionChatAddUser, MessageActionChatJoinedByLink, MessageActionChatJoinedByRequest)):
                                             has_new_joins = True
                                             break
+                                    if not has_new_joins and highest_id > last_seen_id + 2:
+                                        has_new_joins = True
                                     data["link_last_msg_id"][hash_str] = highest_id
                             except Exception: pass
                             
