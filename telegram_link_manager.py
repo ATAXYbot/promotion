@@ -1993,6 +1993,9 @@ async def master_spectator_engine(user_id: int, chat_id: int):
                                     target_hash = m_data["hash_str"]
                                     GLOBAL_SPECTATOR_LOGS.setdefault(target_hash, {})["last_friend_seen"] = time.time()
                         
+                        if not has_new_joins and highest_id > last_seen_id + 2:
+                            has_new_joins = True
+                            
                         m_data["last_msg_id"] = highest_id
                     
                     if has_new_joins:
@@ -2011,7 +2014,7 @@ async def master_spectator_engine(user_id: int, chat_id: int):
                     m_data["last_count"] = new_count
                 except Exception: pass
                 
-            for _ in range(100):
+            for _ in range(10):
                 if not data["loop_active"]: break
                 await asyncio.sleep(1)
         except Exception as e:
@@ -2588,12 +2591,12 @@ async def runner_engine(user_id: int, chat_id: int):
                 except UserAlreadyParticipantError:
                     await send_alert(user_id, chat_id, f"🧹 Already in `{link}` (likely due to a previous crash). Cleaning up and keeping in queue.", priority="LOW")
                     try:
-                        # Resolve the chat entity and leave to fix the zombie state
-                        invite_info = await user_client(CheckChatInviteRequest(hash_str))
                         if hasattr(invite_info, 'chat'):
-                            await user_client.delete_dialog(invite_info.chat.id)
+                            await user_client.delete_dialog(invite_info.chat)
                     except Exception:
                         pass
+                    data.setdefault("link_schedule", {})[hash_str] = time.time() + 600 # Wait 10 mins
+                    save_state()
                     continue
                 
                 except FloodWaitError as e:
