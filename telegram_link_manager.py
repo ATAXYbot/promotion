@@ -696,7 +696,14 @@ async def message_handler(event):
                 await event.respond("⚠️ Link is already in the queue!")
             else:
                 data["queue"].append(link)
-                await event.respond(f"✅ Added link to queue. Total links: {len(data['queue'])}")
+                h = extract_hash(link)
+                # Global unstop to recover from Kicks or Manual Pauses
+                for uid, udata in user_data.items():
+                    if h in udata.get("stopped_links", []):
+                        udata["stopped_links"].remove(h)
+                    if h in udata.get("paused_links", []):
+                        udata["paused_links"].remove(h)
+                await event.respond(f"✅ Added link to queue (and globally un-paused it). Total links: {len(data['queue'])}")
         else:
             await event.respond("❌ Invalid link format. Must contain 't.me'.")
         data["login_state"] = None
@@ -1917,7 +1924,7 @@ async def master_spectator_engine(user_id: int, chat_id: int):
                                 init_msgs = await user_client.get_messages(target_peer, limit=1)
                                 if init_msgs: initial_msg_id = init_msgs[0].id
                             except Exception: pass
-                            monitored_chats[peer_id] = {"hash_str": h, "last_count": last_count, "last_msg_id": initial_msg_id}
+                            monitored_chats[peer_id] = {"hash_str": h, "last_count": last_count, "last_msg_id": initial_msg_id, "entity": target_peer}
                             await send_alert(user_id, chat_id, f"👁️ **Master Spectator:** Attached to `{link}`", priority="LOW")
                         elif join_failed:
                             # Auto-stop globally!
@@ -1930,24 +1937,35 @@ async def master_spectator_engine(user_id: int, chat_id: int):
                     
             for c_id, m_data in list(monitored_chats.items()):
                 if not data["loop_active"]: break
+                target_entity = m_data.get("entity", c_id)
                 try:
-                    entity = await user_client.get_entity(c_id)
-                    full = await user_client(GetFullChannelRequest(entity))
+                    full = await user_client(GetFullChannelRequest(target_entity))
                     new_count = full.full_chat.participants_count or 0
+                except Exception as e:
+                    target_hash = m_data["hash_str"]
+                    await send_alert(user_id, chat_id, f"🚨 **Master Spectator Error:** Lost access to `{target_hash}`! (Kicked/Banned?). Reason: {e}\n\n🛑 **Auto-stopping link globally!**", priority="CRITICAL")
+                    for uid, udata in user_data.items():
+                        if target_hash not in udata.get("stopped_links", []):
+                            udata.setdefault("stopped_links", []).append(target_hash)
+                    del monitored_chats[c_id]
+                    save_state()
+                    continue
+                
+                try:
                     diff = new_count - m_data["last_count"]
                     
                     # 1. Manual Message Polling (Bypasses ChatAction and Participant Cache entirely)
-                    recent_msgs = await user_client.get_messages(c_id, limit=20)
+                    recent_msgs = await user_client.get_messages(target_entity, limit=100)
                     has_new_joins = False
                     if recent_msgs:
                         highest_id = recent_msgs[0].id
                         last_seen_id = m_data.get("last_msg_id", highest_id)
                         
-                        from telethon.tl.types import MessageActionChatAddUser, MessageActionChatJoinedByLink
+                        from telethon.tl.types import MessageActionChatAddUser, MessageActionChatJoinedByLink, MessageActionChatJoinedByRequest
                         for msg in recent_msgs:
                             if msg.id <= last_seen_id:
                                 break # We already scanned these messages in the previous loop
-                            if getattr(msg, 'action', None) and isinstance(msg.action, (MessageActionChatAddUser, MessageActionChatJoinedByLink)):
+                            if getattr(msg, 'action', None) and isinstance(msg.action, (MessageActionChatAddUser, MessageActionChatJoinedByLink, MessageActionChatJoinedByRequest)):
                                 # Is it a friend or a foreign spammer?
                                 is_friend = False
                                 if msg.sender_id in KNOWN_BOT_IDS: is_friend = True
@@ -1956,6 +1974,9 @@ async def master_spectator_engine(user_id: int, chat_id: int):
                                 if not is_friend:
                                     has_new_joins = True
                                     break
+                                else:
+                                    target_hash = m_data["hash_str"]
+                                    GLOBAL_SPECTATOR_LOGS.setdefault(target_hash, {})["last_friend_seen"] = time.time()
                         
                         m_data["last_msg_id"] = highest_id
                     
@@ -2168,7 +2189,7 @@ async def runner_engine(user_id: int, chat_id: int):
                     full_chat_req = await user_client(GetFullChannelRequest(entity))
                     
                     try:
-                        p_list = await user_client.get_participants(entity, limit=40)
+                        p_list = await user_client.get_participants(entity, limit=100)
                     except Exception as e:
                         p_list = []
                 
@@ -2281,6 +2302,28 @@ async def runner_engine(user_id: int, chat_id: int):
                     elif last_count > 0:
                         time_since_last_action = time.time() - last_action_time
                         diff = participants_count - last_count
+                        
+                        # --- PUBLIC GROUP CACHE BYPASS ---
+                        if is_public_group and diff == 0:
+                            has_new_joins = False
+                            try:
+                                c_peer = invite_info.chat if hasattr(invite_info, 'chat') else hash_str
+                                recent_msgs = await user_client.get_messages(c_peer, limit=100)
+                                if recent_msgs:
+                                    highest_id = recent_msgs[0].id
+                                    last_seen_id = data.setdefault("link_last_msg_id", {}).get(hash_str, highest_id)
+                                    from telethon.tl.types import MessageActionChatAddUser, MessageActionChatJoinedByLink, MessageActionChatJoinedByRequest
+                                    for msg in recent_msgs:
+                                        if msg.id <= last_seen_id: break
+                                        if getattr(msg, 'action', None) and isinstance(msg.action, (MessageActionChatAddUser, MessageActionChatJoinedByLink, MessageActionChatJoinedByRequest)):
+                                            has_new_joins = True
+                                            break
+                                    data["link_last_msg_id"][hash_str] = highest_id
+                            except Exception: pass
+                            
+                            if has_new_joins:
+                                diff = 1
+                        # ---------------------------------
                     
                         if diff >= 10:
                             if provided_participants and genuine_new_users_at_top == 0:
@@ -2290,7 +2333,7 @@ async def runner_engine(user_id: int, chat_id: int):
                                 is_active_mode = True
                                 data.setdefault("high_traffic_links", {})[hash_str] = time.time()
                                 await send_alert(user_id, chat_id, f"🔥 **Active Mode (High Traffic):** {diff} new users joined `{link}`. Engaging!", priority="HIGH")
-                        elif genuine_new_users_at_top > 0 or (diff >= 1 and not provided_participants):
+                        elif genuine_new_users_at_top > 0 or (diff >= 1 and not provided_participants) or has_new_joins:
                             if is_high_traffic:
                                 is_active_mode = False
                                 await send_alert(user_id, chat_id, f"⏳ **Passive Mode (Throttling):** Genuine new users detected in `{link}`, waiting for 10 users because group is High Traffic.")
