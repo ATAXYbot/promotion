@@ -1874,8 +1874,12 @@ async def master_spectator_engine(user_id: int, chat_id: int):
                         if '+' not in link and 'joinchat' not in link: is_public = True
                         if is_public:
                             entity = await user_client.get_entity(h)
-                            try: await user_client(JoinChannelRequest(entity))
-                            except Exception: pass
+                            try: 
+                                await user_client(JoinChannelRequest(entity))
+                            except UserAlreadyParticipantError:
+                                pass
+                            except Exception as e:
+                                await send_alert(user_id, chat_id, f"⚠️ **Master Spectator Error:** Failed to join public group `{h}`. Reason: {e}", priority="LOW")
                             target_peer = entity
                             full = await user_client(GetFullChannelRequest(entity))
                             last_count = full.full_chat.participants_count or 0
@@ -1884,14 +1888,25 @@ async def master_spectator_engine(user_id: int, chat_id: int):
                                 invite = await user_client(CheckChatInviteRequest(h))
                                 target_peer = invite.chat
                                 last_count = getattr(invite.chat, 'participants_count', 0)
-                                try: await user_client(ImportChatInviteRequest(h))
-                                except Exception: pass
-                            except Exception: pass
+                                try: 
+                                    await user_client(ImportChatInviteRequest(h))
+                                except UserAlreadyParticipantError:
+                                    pass
+                                except Exception as e:
+                                    await send_alert(user_id, chat_id, f"⚠️ **Master Spectator Error:** Failed to join private group `{h}`. Reason: {e}", priority="LOW")
+                            except Exception as e:
+                                await send_alert(user_id, chat_id, f"⚠️ **Master Spectator Error:** Could not resolve invite `{h}`. Reason: {e}", priority="LOW")
                             
                         if target_peer:
                             from telethon import utils
                             peer_id = utils.get_peer_id(target_peer)
-                            monitored_chats[peer_id] = {"hash_str": h, "last_count": last_count}
+                            # Get the most recent message ID to initialize manual polling
+                            initial_msg_id = 0
+                            try:
+                                init_msgs = await user_client.get_messages(target_peer, limit=1)
+                                if init_msgs: initial_msg_id = init_msgs[0].id
+                            except Exception: pass
+                            monitored_chats[peer_id] = {"hash_str": h, "last_count": last_count, "last_msg_id": initial_msg_id}
                             await send_alert(user_id, chat_id, f"👁️ **Master Spectator:** Attached to `{link}`", priority="LOW")
                     except Exception as e:
                         logger.error(f"Master Spectator failed to attach to {h}: {e}")
@@ -1902,29 +1917,43 @@ async def master_spectator_engine(user_id: int, chat_id: int):
                     entity = await user_client.get_entity(c_id)
                     full = await user_client(GetFullChannelRequest(entity))
                     new_count = full.full_chat.participants_count or 0
-                
                     diff = new_count - m_data["last_count"]
-                    if diff >= 3:
-                        recent_msgs = await user_client.get_messages(c_id, limit=15)
-                        has_join_msgs = False
+                    
+                    # 1. Manual Message Polling (Bypasses ChatAction and Participant Cache entirely)
+                    recent_msgs = await user_client.get_messages(c_id, limit=20)
+                    has_new_joins = False
+                    if recent_msgs:
+                        highest_id = recent_msgs[0].id
+                        last_seen_id = m_data.get("last_msg_id", highest_id)
+                        
                         from telethon.tl.types import MessageActionChatAddUser, MessageActionChatJoinedByLink
                         for msg in recent_msgs:
+                            if msg.id <= last_seen_id:
+                                break # We already scanned these messages in the previous loop
                             if getattr(msg, 'action', None) and isinstance(msg.action, (MessageActionChatAddUser, MessageActionChatJoinedByLink)):
-                                has_join_msgs = True
-                                break
-                            
-                        if not has_join_msgs:
-                            # Hiding joins! We can't see who joined, but the count went up.
-                            # We should issue a ticket anyway because there IS traffic!
-                            target_hash = m_data["hash_str"]
-                            GLOBAL_SPECTATOR_LOGS.setdefault(target_hash, {})["hidden_joins_detected"] = time.time()
-                            GLOBAL_JOIN_TICKETS[target_hash] = time.time()
-                            await send_alert(user_id, chat_id, f"🚨 **Hidden Joins Detected in `{target_hash}`!** Group grew by {diff} users but join msgs are hidden. Issuing blind traffic ticket!", priority="CRITICAL")
-                        else:
-                            # Genuine traffic detected by fallback loop (ChatAction event missed it)
-                            target_hash = m_data["hash_str"]
-                            GLOBAL_JOIN_TICKETS[target_hash] = time.time()
-                            GLOBAL_SPECTATOR_LOGS.setdefault(target_hash, {})["last_foreign_join"] = time.time()
+                                # Is it a friend or a foreign spammer?
+                                is_friend = False
+                                if msg.sender_id in KNOWN_BOT_IDS: is_friend = True
+                                elif hasattr(msg.action, 'users') and any(uid in KNOWN_BOT_IDS for uid in getattr(msg.action, 'users', [])): is_friend = True
+                                
+                                if not is_friend:
+                                    has_new_joins = True
+                                    break
+                        
+                        m_data["last_msg_id"] = highest_id
+                    
+                    if has_new_joins:
+                        # Polling found a brand new join message that ChatAction missed!
+                        target_hash = m_data["hash_str"]
+                        GLOBAL_JOIN_TICKETS[target_hash] = time.time()
+                        GLOBAL_SPECTATOR_LOGS.setdefault(target_hash, {})["last_foreign_join"] = time.time()
+                    elif diff >= 3:
+                        # 2. Hidden Joins Check: Count went up significantly, but NO join messages were found
+                        # (because if they were found, has_new_joins would be True)
+                        target_hash = m_data["hash_str"]
+                        GLOBAL_SPECTATOR_LOGS.setdefault(target_hash, {})["hidden_joins_detected"] = time.time()
+                        GLOBAL_JOIN_TICKETS[target_hash] = time.time()
+                        await send_alert(user_id, chat_id, f"🚨 **Hidden Joins Detected in `{target_hash}`!** Group grew by {diff} users but join msgs are hidden. Issuing blind traffic ticket!", priority="CRITICAL")
                         
                     m_data["last_count"] = new_count
                 except Exception: pass
