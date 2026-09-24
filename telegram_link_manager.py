@@ -1870,6 +1870,7 @@ async def master_spectator_engine(user_id: int, chat_id: int):
                     try:
                         target_peer = None
                         last_count = 0
+                        join_failed = False
                         is_public = False
                         if '+' not in link and 'joinchat' not in link: is_public = True
                         if is_public:
@@ -1879,25 +1880,35 @@ async def master_spectator_engine(user_id: int, chat_id: int):
                             except UserAlreadyParticipantError:
                                 pass
                             except Exception as e:
-                                await send_alert(user_id, chat_id, f"⚠️ **Master Spectator Error:** Failed to join public group `{h}`. Reason: {e}", priority="LOW")
-                            target_peer = entity
-                            full = await user_client(GetFullChannelRequest(entity))
-                            last_count = full.full_chat.participants_count or 0
+                                join_failed = True
+                                await send_alert(user_id, chat_id, f"🚨 **Master Spectator Error:** Failed to join public group `{h}`. Reason: {e}\n\n🛑 **Auto-stopping link globally** so joiner bots don't hang!", priority="CRITICAL")
+                            
+                            if not join_failed:
+                                target_peer = entity
+                                full = await user_client(GetFullChannelRequest(entity))
+                                last_count = full.full_chat.participants_count or 0
                         else:
                             try:
                                 invite = await user_client(CheckChatInviteRequest(h))
-                                target_peer = invite.chat
-                                last_count = getattr(invite.chat, 'participants_count', 0)
                                 try: 
                                     await user_client(ImportChatInviteRequest(h))
                                 except UserAlreadyParticipantError:
                                     pass
                                 except Exception as e:
-                                    await send_alert(user_id, chat_id, f"⚠️ **Master Spectator Error:** Failed to join private group `{h}`. Reason: {e}", priority="LOW")
+                                    join_failed = True
+                                    if "Request to join" in str(e) or "INVITE_REQUEST_SENT" in str(e):
+                                        await send_alert(user_id, chat_id, f"🚨 **Master Spectator Error:** `{h}` requires admin approval to join! Master cannot monitor until approved.\n\n🛑 **Auto-stopping link globally!**", priority="CRITICAL")
+                                    else:
+                                        await send_alert(user_id, chat_id, f"🚨 **Master Spectator Error:** Failed to join private group `{h}`. Reason: {e}\n\n🛑 **Auto-stopping link globally!**", priority="CRITICAL")
+                                
+                                if not join_failed:
+                                    target_peer = invite.chat
+                                    last_count = getattr(invite.chat, 'participants_count', 0)
                             except Exception as e:
-                                await send_alert(user_id, chat_id, f"⚠️ **Master Spectator Error:** Could not resolve invite `{h}`. Reason: {e}", priority="LOW")
+                                join_failed = True
+                                await send_alert(user_id, chat_id, f"🚨 **Master Spectator Error:** Could not resolve invite `{h}`. Reason: {e}\n\n🛑 **Auto-stopping link globally!**", priority="CRITICAL")
                             
-                        if target_peer:
+                        if target_peer and not join_failed:
                             from telethon import utils
                             peer_id = utils.get_peer_id(target_peer)
                             # Get the most recent message ID to initialize manual polling
@@ -1908,6 +1919,12 @@ async def master_spectator_engine(user_id: int, chat_id: int):
                             except Exception: pass
                             monitored_chats[peer_id] = {"hash_str": h, "last_count": last_count, "last_msg_id": initial_msg_id}
                             await send_alert(user_id, chat_id, f"👁️ **Master Spectator:** Attached to `{link}`", priority="LOW")
+                        elif join_failed:
+                            # Auto-stop globally!
+                            for uid, udata in user_data.items():
+                                if h not in udata.get("stopped_links", []):
+                                    udata.setdefault("stopped_links", []).append(h)
+                            save_state()
                     except Exception as e:
                         logger.error(f"Master Spectator failed to attach to {h}: {e}")
                     
