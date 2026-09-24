@@ -1799,18 +1799,40 @@ async def master_spectator_engine(user_id: int, chat_id: int):
                         if getattr(msg, 'action', None):
                             msg_height = 30
                             if hasattr(msg, 'sender') and msg.sender:
-                                name_len = len(getattr(msg.sender, 'first_name', '') or '') + len(getattr(msg.sender, 'last_name', '') or '')
-                                msg_height += (name_len // 40) * 20
-                            if hasattr(msg.action, 'users'):
-                                if msg.sender_id in KNOWN_BOT_IDS:
-                                    friend_visible = True
-                                    break
+                                first = getattr(msg.sender, 'first_name', '') or ''
+                                last = getattr(msg.sender, 'last_name', '') or ''
+                                full_name = f"{first} {last}".strip()
+                                # Calculate text length, accounting for Zalgo newlines in names
+                                newlines = full_name.count('\n')
+                                wrapped = sum(len(line) // 35 for line in full_name.split('\n'))
+                                msg_height += (newlines + wrapped) * 20
+                                msg_height += 20 # Base line for "joined the group"
                         else:
-                            if getattr(msg, 'text', None): msg_height += (len(msg.text) // 40) * 20
-                            if getattr(msg, 'media', None): msg_height += 250
+                            if getattr(msg, 'text', None): 
+                                lines = msg.text.count('\n') + 1
+                                wrapped = sum(len(line) // 40 for line in msg.text.split('\n'))
+                                msg_height += (lines + wrapped) * 20
+                            if getattr(msg, 'media', None): msg_height += 300
                             if getattr(msg, 'fwd_from', None) or getattr(msg, 'reply_to_msg_id', None): msg_height += 40
+                            
+                        # Add height FIRST to simulate scrolling down the screen
                         current_height += msg_height
-                        if current_height >= 800: break
+                        
+                        # If the total height exceeds screen height, this message is partially/fully cut off
+                        if current_height > 800: 
+                            break
+                            
+                        # Only if it fully fits on screen, check if it's our friend!
+                        if getattr(msg, 'action', None):
+                            is_friend = False
+                            if msg.sender_id in KNOWN_BOT_IDS:
+                                is_friend = True
+                            elif hasattr(msg.action, 'users') and any(uid in KNOWN_BOT_IDS for uid in getattr(msg.action, 'users', [])):
+                                is_friend = True
+                                
+                            if is_friend:
+                                friend_visible = True
+                                break
                     if not friend_visible:
                         GLOBAL_JOIN_TICKETS[target_hash] = time.time()
                         GLOBAL_SPECTATOR_LOGS.setdefault(target_hash, {})["last_foreign_join"] = time.time()
@@ -1846,7 +1868,7 @@ async def master_spectator_engine(user_id: int, chat_id: int):
                 if h not in current_hashes:
                     link = hash_to_link[h]
                     try:
-                        chat_id = None
+                        target_peer = None
                         last_count = 0
                         is_public = False
                         if '+' not in link and 'joinchat' not in link: is_public = True
@@ -1854,20 +1876,22 @@ async def master_spectator_engine(user_id: int, chat_id: int):
                             entity = await user_client.get_entity(h)
                             try: await user_client(JoinChannelRequest(entity))
                             except Exception: pass
-                            chat_id = entity.id
+                            target_peer = entity
                             full = await user_client(GetFullChannelRequest(entity))
                             last_count = full.full_chat.participants_count or 0
                         else:
                             try:
                                 invite = await user_client(CheckChatInviteRequest(h))
-                                chat_id = invite.chat.id
+                                target_peer = invite.chat
                                 last_count = getattr(invite.chat, 'participants_count', 0)
                                 try: await user_client(ImportChatInviteRequest(h))
                                 except Exception: pass
                             except Exception: pass
                             
-                        if chat_id:
-                            monitored_chats[chat_id] = {"hash_str": h, "last_count": last_count}
+                        if target_peer:
+                            from telethon import utils
+                            peer_id = utils.get_peer_id(target_peer)
+                            monitored_chats[peer_id] = {"hash_str": h, "last_count": last_count}
                             await send_alert(user_id, chat_id, f"👁️ **Master Spectator:** Attached to `{link}`", priority="LOW")
                     except Exception as e:
                         logger.error(f"Master Spectator failed to attach to {h}: {e}")
@@ -1890,16 +1914,12 @@ async def master_spectator_engine(user_id: int, chat_id: int):
                                 break
                             
                         if not has_join_msgs:
+                            # Hiding joins! We can't see who joined, but the count went up.
+                            # We should issue a ticket anyway because there IS traffic!
                             target_hash = m_data["hash_str"]
                             GLOBAL_SPECTATOR_LOGS.setdefault(target_hash, {})["hidden_joins_detected"] = time.time()
-                            for u_id, u_data in user_data.items():
-                                if target_hash not in u_data.get("stopped_links", []):
-                                    u_data.setdefault("stopped_links", []).append(target_hash)
-                            save_state()
-                        
-                            await send_alert(user_id, chat_id, f"🚨 **Hidden Joins Detected!**\nGroup `{target_hash}` grew by {diff} users but 0 join messages were found. Admins are hiding joins! Link has been **AUTO-STOPPED** globally.", priority="CRITICAL")
-                            del monitored_chats[c_id]
-                            continue
+                            GLOBAL_JOIN_TICKETS[target_hash] = time.time()
+                            await send_alert(user_id, chat_id, f"🚨 **Hidden Joins Detected in `{target_hash}`!** Group grew by {diff} users but join msgs are hidden. Issuing blind traffic ticket!", priority="CRITICAL")
                         else:
                             # Genuine traffic detected by fallback loop (ChatAction event missed it)
                             target_hash = m_data["hash_str"]
@@ -2202,14 +2222,16 @@ async def runner_engine(user_id: int, chat_id: int):
                     if current_mode == "SPECTATOR_JOINER" and last_count > 0:
                         ticket_time = GLOBAL_JOIN_TICKETS.get(hash_str, 0)
                         if ticket_time > last_action_time:
-                            # Consume ticket
+                            # Screen Dominance: Master Spectator only issues a ticket when our friend account 
+                            # is physically pushed off the screen by other joins (even if they instantly leave).
+                            # We must unconditionally consume the ticket to reclaim screen visibility.
                             GLOBAL_JOIN_TICKETS[hash_str] = 0
                             is_active_mode = True
                             diff = 1
-                            await send_alert(user_id, chat_id, f"🚀 **Spectator Ticket Consumed:** Foreign join detected by monitor for `{link}`. Engaging!", priority="HIGH")
+                            await send_alert(user_id, chat_id, f"🚀 **Spectator Ticket Consumed:** Reclaiming screen dominance for `{link}`! Engaging!", priority="HIGH")
                         else:
                             is_active_mode = False
-                            await send_alert(user_id, chat_id, f"📉 **Joiner Pool:** No tickets available for `{link}`. Sleeping.", priority="LOW")
+                            await send_alert(user_id, chat_id, f"📉 **Joiner Pool:** Screen dominated. No tickets available for `{link}`. Sleeping.", priority="LOW")
                     elif last_count > 0:
                         time_since_last_action = time.time() - last_action_time
                         diff = participants_count - last_count
@@ -2388,25 +2410,25 @@ async def runner_engine(user_id: int, chat_id: int):
                                             if getattr(msg, 'action', None):
                                                 # Service messages (like joins/leaves) are very small
                                                 msg_height = 30
-                                            
-                                                # Account for users using long names or invisible characters to push chat up
                                                 if hasattr(msg, 'sender') and msg.sender:
-                                                    name_len = len(getattr(msg.sender, 'first_name', '') or '') + len(getattr(msg.sender, 'last_name', '') or '')
-                                                    msg_height += (name_len // 40) * 20
-                                                
-                                                if hasattr(msg.action, 'users'):
-                                                    if msg.sender_id in KNOWN_BOT_IDS:
-                                                        friend_visible = True
-                                                        break
+                                                    first = getattr(msg.sender, 'first_name', '') or ''
+                                                    last = getattr(msg.sender, 'last_name', '') or ''
+                                                    full_name = f"{first} {last}".strip()
+                                                    # Calculate text length, accounting for Zalgo newlines in names
+                                                    newlines = full_name.count('\n')
+                                                    wrapped = sum(len(line) // 35 for line in full_name.split('\n'))
+                                                    msg_height += (newlines + wrapped) * 20
+                                                    msg_height += 20 # Base line for "joined the group"
                                             else:
                                                 # Text messages: add height based on length (wrap)
-                                                if msg.text:
-                                                    # roughly 20 units per 40 characters
-                                                    msg_height += (len(msg.text) // 40) * 20
+                                                if getattr(msg, 'text', None):
+                                                    lines = msg.text.count('\n') + 1
+                                                    wrapped = sum(len(line) // 40 for line in msg.text.split('\n'))
+                                                    msg_height += (lines + wrapped) * 20
                                             
                                                 # Media (Photos, Videos, Stickers) take a lot of space
-                                                if msg.media:
-                                                    msg_height += 250
+                                                if getattr(msg, 'media', None):
+                                                    msg_height += 300
                                                 
                                                 # Forwards or Replies add extra header padding
                                                 if getattr(msg, 'fwd_from', None) or getattr(msg, 'reply_to_msg_id', None):
@@ -2414,9 +2436,20 @@ async def runner_engine(user_id: int, chat_id: int):
                                                 
                                             current_height += msg_height
                                         
-                                            if current_height >= MAX_SCREEN_HEIGHT:
-                                                # Screen is full of other messages, friend is pushed off
+                                            if current_height > MAX_SCREEN_HEIGHT:
+                                                # Screen is full of other messages, friend is pushed off (partially or fully)
                                                 break
+                                                
+                                            if getattr(msg, 'action', None):
+                                                is_friend = False
+                                                if msg.sender_id in KNOWN_BOT_IDS:
+                                                    is_friend = True
+                                                elif hasattr(msg.action, 'users') and any(uid in KNOWN_BOT_IDS for uid in getattr(msg.action, 'users', [])):
+                                                    is_friend = True
+                                                    
+                                                if is_friend:
+                                                    friend_visible = True
+                                                    break
                                             
                                         if not friend_visible:
                                             GLOBAL_JOIN_TICKETS[hash_str] = time.time()
